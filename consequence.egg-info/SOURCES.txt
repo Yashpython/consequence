@@ -2,9 +2,11 @@ README.md
 pyproject.toml
 consequence/__init__.py
 consequence/config.py
+consequence/db.py
 consequence.egg-info/PKG-INFO
 consequence.egg-info/SOURCES.txt
 consequence.egg-info/dependency_links.txt
 consequence.egg-info/requires.txt
 consequence.egg-info/top_level.txt
+tests/test_schema.py
 tests/test_smoke.py

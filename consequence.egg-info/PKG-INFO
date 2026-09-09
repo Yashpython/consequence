@@ -4,6 +4,7 @@ Version: 0.0.1
 Summary: A benchmark that grades LLM agents on final database state rather than on their own transcripts.
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: psycopg[binary]>=3.1
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: ruff; extra == "dev"

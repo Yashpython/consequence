@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: consequence
+      POSTGRES_PASSWORD: consequence
+      POSTGRES_DB: consequence
+    ports:
+      # 5433 on the host to avoid colliding with a local Postgres on 5432.
+      - "5433:5432"
+    volumes:
+      - consequence_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U consequence -d consequence"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  consequence_pgdata:
