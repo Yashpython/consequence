@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pip install -e \".[dev]\" -q)",
+      "Bash(ruff check *)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m ruff check .)"
+    ]
+  }
+}

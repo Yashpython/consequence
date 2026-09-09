@@ -1,0 +1,39 @@
+Metadata-Version: 2.4
+Name: consequence
+Version: 0.0.1
+Summary: A benchmark that grades LLM agents on final database state rather than on their own transcripts.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: python-dotenv; extra == "dev"
+
+# consequence
+
+A benchmark that grades LLM agents on final database state rather than on their own transcripts.
+
+**Status: in development**
+
+## Setup
+
+Requires Python 3.11+.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+Copy `.env.example` to `.env` and fill in the values you need:
+
+```bash
+cp .env.example .env
+```
+
+## Development
+
+```bash
+ruff check .
+pytest
+```

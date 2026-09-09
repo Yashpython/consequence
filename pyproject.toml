@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "consequence"
+version = "0.0.1"
+description = "A benchmark that grades LLM agents on final database state rather than on their own transcripts."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "python-dotenv",
+]
+
+[tool.setuptools.packages.find]
+include = ["consequence*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
