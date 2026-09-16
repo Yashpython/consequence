@@ -4,7 +4,21 @@
       "Bash(python -m pip install -e \".[dev]\" -q)",
       "Bash(ruff check *)",
       "Bash(python -m pytest -q)",
-      "Bash(python -m ruff check .)"
+      "Bash(python -m ruff check .)",
+      "Bash(mkdir -p /c/Users/gamer/AppData/Local/Temp/claude/scratch)",
+      "Bash(cat)",
+      "Bash(python /tmp/gen_seed.py)",
+      "Read(//tmp/**)",
+      "Read(//c/tmp/**)",
+      "Bash(python -c \"import os; print\\(os.getcwd\\(\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python /tmp/finalize_seed.py)",
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "PowerShell(docker --version)",
+      "PowerShell(docker compose version)",
+      "Bash(python -)",
+      "Bash(git rm *)"
     ]
   }
 }

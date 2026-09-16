@@ -6,6 +6,7 @@ __pycache__/
 node_modules/
 results/
 snapshots/
+*.egg-info/
 
 CLAUDE.md
 

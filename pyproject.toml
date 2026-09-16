@@ -27,3 +27,7 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: requires a running Postgres (see docker-compose.yml / `make up`)",
+]
+addopts = "-m 'not live'"
