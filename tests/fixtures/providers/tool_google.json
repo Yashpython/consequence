@@ -1,0 +1,14 @@
+{
+  "name": "adjust_invoice",
+  "description": "Fixture tool: adjust one invoice.",
+  "parameters": {
+    "type": "OBJECT",
+    "properties": {
+      "invoice_id": {"type": "INTEGER", "description": "Invoice id", "minimum": 1},
+      "status": {"type": "STRING", "description": "New status", "enum": ["active", "void"]},
+      "amount": {"type": "NUMBER", "description": "Amount", "minimum": 0, "maximum": 1000},
+      "notify": {"type": "BOOLEAN"}
+    },
+    "required": ["invoice_id"]
+  }
+}

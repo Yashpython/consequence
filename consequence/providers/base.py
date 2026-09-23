@@ -28,8 +28,13 @@ class ToolCall:
 class TurnResult:
     """What a provider returns for one model turn.
 
-    raw_response is stored verbatim (by the harness, into the results DB)
-    for later re-analysis -- it is never interpreted by the harness itself.
+    raw_response is the provider's response body exactly as received. It is
+    never interpreted by the harness; consequence/runner.py stores it
+    verbatim in the transcripts table for later re-analysis.
+
+    retries counts HTTP 429/5xx retries it took to get this turn; cost_usd
+    is the turn's exact cost from pinned prices, or None when it can't be
+    computed exactly (never an estimate).
     """
 
     text: str | None
@@ -39,6 +44,8 @@ class TurnResult:
     output_tokens: int = 0
     latency_ms: int = 0
     raw_response: Any = None
+    retries: int = 0
+    cost_usd: float | None = None
 
 
 class Provider(Protocol):
@@ -55,3 +62,18 @@ class Provider(Protocol):
     model_id: str
 
     def run_turn(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> TurnResult: ...
+
+
+class RecordingProvider(Provider, Protocol):
+    """A Provider that keeps a per-episode ledger of what it did.
+
+    The harness only ever sees the Provider half. consequence/runner.py
+    calls start_episode() before handing the provider to the harness and
+    finish_episode() after, and writes the returned ledger (raw responses,
+    retry count, cost) to the results DB -- so the harness itself never has
+    to know about cost or retries.
+    """
+
+    def start_episode(self) -> None: ...
+
+    def finish_episode(self) -> Any: ...

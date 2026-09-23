@@ -1,4 +1,4 @@
-.PHONY: up down reset test test-live
+.PHONY: up down reset test test-live test-smoke
 
 up:
 	docker compose up -d
@@ -15,3 +15,6 @@ test:
 
 test-live:
 	pytest -m live
+
+test-smoke:
+	pytest -m smoke

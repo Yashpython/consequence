@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     output_tokens INTEGER,
     cost_usd      REAL,
     latency_ms    INTEGER,
-    turn_count    INTEGER
+    turn_count    INTEGER,
+    retry_count   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS transcripts (
@@ -58,7 +59,10 @@ CREATE TABLE IF NOT EXISTS transcripts (
     content     TEXT,
     tool_name   TEXT,
     tool_args   TEXT,
-    tool_result TEXT
+    tool_result TEXT,
+    -- assistant turns only: the provider's response body exactly as
+    -- received, so any later analysis never needs a model re-run.
+    raw_response TEXT
 );
 
 -- The raw before/after state for an episode, stored verbatim so a grader
@@ -89,6 +93,14 @@ CREATE TABLE IF NOT EXISTS gradings (
     UNIQUE (episode_id, grader)
 );
 """
+
+# Columns added after the first schema version. CREATE TABLE IF NOT EXISTS
+# leaves an existing table alone, so these are added to older databases by
+# ALTER TABLE on open.
+_ADDED_COLUMNS = (
+    ("episodes", "retry_count", "INTEGER"),
+    ("transcripts", "raw_response", "TEXT"),
+)
 
 
 def _now() -> str:
@@ -126,6 +138,10 @@ class Results:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA_SQL)
+        for table, column, decl in _ADDED_COLUMNS:
+            existing = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         self._conn.commit()
 
     def close(self) -> None:
@@ -235,6 +251,41 @@ class Results:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
+            )
+
+    def record_provider_usage(
+        self,
+        episode_id: int,
+        *,
+        cost_usd: float | None,
+        retry_count: int,
+        raw_responses: Sequence[Any],
+    ) -> None:
+        """Attach a provider's per-episode ledger to an already-recorded episode.
+
+        raw_responses holds one entry per assistant turn, in order; each is
+        stored verbatim on the matching assistant transcript row. A count
+        mismatch means the ledger and the transcript disagree about what
+        happened, so nothing is written.
+        """
+        with self._conn:
+            rows = self._conn.execute(
+                "SELECT id FROM transcripts WHERE episode_id = ? AND role = 'assistant' "
+                "ORDER BY turn_index",
+                (episode_id,),
+            ).fetchall()
+            if len(rows) != len(raw_responses):
+                raise ValueError(
+                    f"episode {episode_id}: {len(rows)} assistant turn(s) recorded but "
+                    f"{len(raw_responses)} raw response(s) in the provider ledger"
+                )
+            self._conn.executemany(
+                "UPDATE transcripts SET raw_response = ? WHERE id = ?",
+                [(_json(raw), row["id"]) for raw, row in zip(raw_responses, rows, strict=True)],
+            )
+            self._conn.execute(
+                "UPDATE episodes SET cost_usd = ?, retry_count = ? WHERE id = ?",
+                (cost_usd, retry_count, episode_id),
             )
 
     def record_state_diff(

@@ -1,0 +1,77 @@
+# The model registry. See docs/models.md for why each model is here.
+#
+# Rules (enforced by consequence/providers/registry.py on load):
+#   - api_model is an exact, pinned version string -- never a floating alias
+#     ("latest", an undated OpenAI name, an OpenRouter ":variant"). It is
+#     written verbatim onto every episode row as model_id.
+#   - prices are USD per million tokens and are the ONLY source of cost_usd:
+#     cost = actual token counts from the response x these prices. Changing a
+#     price here re-prices nothing already recorded; the raw responses (with
+#     their usage blocks) are stored, so cost can be recomputed offline.
+#   - a cached_input price is required wherever the provider caches prompts
+#     automatically; tokens billed in a category with no price here make the
+#     turn's cost NULL (unknown), never an estimate.
+#   - long_context: the whole request is billed at that tier once its prompt
+#     exceeds threshold_input_tokens.
+#   - max_turns (optional) overrides the harness default for this model.
+#   - params (optional) are merged verbatim into every request body.
+#   - routing (OpenRouter only, required) pins the upstream host.
+
+models:
+  - id: claude-opus-5
+    provider: anthropic
+    # Anthropic's current-generation ids are themselves the pinned snapshot
+    # (there is no dated variant and no alias behind this string).
+    api_model: claude-opus-5
+    input_price_per_mtok: 5.00
+    output_price_per_mtok: 25.00
+    max_output_tokens: 16000
+    params:
+      # Pinned explicitly rather than inherited from the API default.
+      output_config: {effort: high}
+
+  - id: gpt-5.5
+    provider: openai
+    api_model: gpt-5.5-2026-04-23
+    input_price_per_mtok: 5.00
+    cached_input_price_per_mtok: 0.50
+    output_price_per_mtok: 30.00
+    long_context:
+      threshold_input_tokens: 272000
+      input_price_per_mtok: 10.00
+      cached_input_price_per_mtok: 1.00
+      output_price_per_mtok: 45.00
+    max_output_tokens: 16000
+    params:
+      reasoning_effort: medium
+
+  - id: gemini-3.1-pro
+    provider: google
+    api_model: gemini-3.1-pro-preview
+    input_price_per_mtok: 2.00
+    cached_input_price_per_mtok: 0.20
+    output_price_per_mtok: 12.00
+    long_context:
+      threshold_input_tokens: 200000
+      input_price_per_mtok: 4.00
+      cached_input_price_per_mtok: 0.40
+      output_price_per_mtok: 18.00
+    max_output_tokens: 16000
+
+  - id: claude-haiku-4.5
+    provider: anthropic
+    api_model: claude-haiku-4-5-20251001
+    input_price_per_mtok: 1.00
+    output_price_per_mtok: 5.00
+    max_output_tokens: 16000
+
+  - id: qwen3-235b-a22b-2507
+    provider: openrouter
+    api_model: qwen/qwen3-235b-a22b-2507
+    input_price_per_mtok: 0.09
+    output_price_per_mtok: 0.35
+    max_output_tokens: 16000
+    routing:
+      order: [deepinfra]
+      allow_fallbacks: false
+      require_parameters: true   # only a host that supports `tools`
