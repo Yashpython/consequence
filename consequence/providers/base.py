@@ -39,6 +39,9 @@ class TurnResult:
     output_tokens: int = 0
     latency_ms: int = 0
     raw_response: Any = None
+    # How many transport-level retries (429/5xx, exponential backoff) it took
+    # to get this turn. 0 for a call that succeeded on the first attempt.
+    retry_count: int = 0
 
 
 class Provider(Protocol):

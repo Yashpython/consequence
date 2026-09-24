@@ -47,18 +47,20 @@ CREATE TABLE IF NOT EXISTS episodes (
     output_tokens INTEGER,
     cost_usd      REAL,
     latency_ms    INTEGER,
-    turn_count    INTEGER
+    turn_count    INTEGER,
+    retry_count   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS transcripts (
-    id          INTEGER PRIMARY KEY,
-    episode_id  INTEGER NOT NULL REFERENCES episodes (id),
-    turn_index  INTEGER NOT NULL,
-    role        TEXT NOT NULL,
-    content     TEXT,
-    tool_name   TEXT,
-    tool_args   TEXT,
-    tool_result TEXT
+    id            INTEGER PRIMARY KEY,
+    episode_id    INTEGER NOT NULL REFERENCES episodes (id),
+    turn_index    INTEGER NOT NULL,
+    role          TEXT NOT NULL,
+    content       TEXT,
+    tool_name     TEXT,
+    tool_args     TEXT,
+    tool_result   TEXT,
+    raw_response  TEXT
 );
 
 -- The raw before/after state for an episode, stored verbatim so a grader
@@ -178,6 +180,7 @@ class Results:
         cost_usd: float | None = None,
         latency_ms: int | None = None,
         turn_count: int | None = None,
+        retry_count: int | None = None,
     ) -> int:
         with self._conn:
             cur = self._conn.execute(
@@ -185,8 +188,8 @@ class Results:
                 INSERT INTO episodes (
                     run_id, task_id, model_id, trial_index, started_at, finished_at,
                     status, error, input_tokens, output_tokens, cost_usd, latency_ms,
-                    turn_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    turn_count, retry_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -202,6 +205,7 @@ class Results:
                     cost_usd,
                     latency_ms,
                     turn_count,
+                    retry_count,
                 ),
             )
         assert cur.lastrowid is not None
@@ -212,7 +216,7 @@ class Results:
 
         `turns` is the full ordered conversation: each item needs
         turn_index, role, and optionally content, tool_name, tool_args,
-        tool_result (the latter two are JSON-encoded if not already a
+        tool_result, raw_response (all JSON-encoded if not already a
         string). If any turn is malformed, none of them are written.
         """
         rows = [
@@ -224,6 +228,7 @@ class Results:
                 turn.get("tool_name"),
                 _json(turn.get("tool_args")),
                 _json(turn.get("tool_result")),
+                _json(turn.get("raw_response")),
             )
             for turn in turns
         ]
@@ -231,8 +236,9 @@ class Results:
             self._conn.executemany(
                 """
                 INSERT INTO transcripts (
-                    episode_id, turn_index, role, content, tool_name, tool_args, tool_result
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    episode_id, turn_index, role, content, tool_name, tool_args, tool_result,
+                    raw_response
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

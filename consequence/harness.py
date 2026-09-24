@@ -25,6 +25,7 @@ from typing import Any
 from consequence.diff import StateDiff, diff
 from consequence.environment import reset, snapshot
 from consequence.providers.base import Provider
+from consequence.providers.registry import compute_cost
 from consequence.results import Results
 from consequence.tools import call_tool
 from consequence.tools.schema import TOOLS
@@ -65,6 +66,8 @@ class EpisodeRecord:
     input_tokens: int
     output_tokens: int
     latency_ms: int
+    retry_count: int
+    cost_usd: float | None
     digest_before: str
     digest_after: str
     diff: StateDiff
@@ -129,6 +132,7 @@ def run_episode(
     output_tokens = 0
     latency_ms = 0
     turns_completed = 0
+    retries_total = 0
     start_time = time.monotonic()
 
     try:
@@ -142,8 +146,9 @@ def run_episode(
             input_tokens += turn.input_tokens
             output_tokens += turn.output_tokens
             latency_ms += turn.latency_ms
+            retries_total += turn.retry_count
 
-            _record_turn("assistant", content=turn.text)
+            _record_turn("assistant", content=turn.text, raw_response=turn.raw_response)
             messages.append(
                 {
                     "role": "assistant",
@@ -186,6 +191,9 @@ def run_episode(
     after = snapshot()
     state_diff = diff(before, after)
     finished_at = datetime.now(UTC).isoformat()
+    # None (rather than a guess) when provider.model_id isn't in models.yaml --
+    # cost_usd is computed from pinned prices, never estimated.
+    cost_usd = compute_cost(provider.model_id, input_tokens, output_tokens)
 
     episode_id = results.record_episode(
         run_id=run_id,
@@ -198,8 +206,10 @@ def run_episode(
         error=error,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cost_usd=cost_usd,
         latency_ms=int(latency_ms),
         turn_count=turns_completed,
+        retry_count=retries_total,
     )
     results.record_transcript(episode_id, transcript)
     results.record_state_diff(
@@ -218,6 +228,8 @@ def run_episode(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=int(latency_ms),
+        retry_count=retries_total,
+        cost_usd=cost_usd,
         digest_before=before.digest,
         digest_after=after.digest,
         diff=state_diff,

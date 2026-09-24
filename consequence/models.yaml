@@ -1,0 +1,52 @@
+# The model registry: every model the benchmark can run, with its exact
+# pinned API version string and the prices used to compute cost_usd.
+#
+# Rules:
+#   - api_model is always an exact, pinned version string. NEVER a floating
+#     alias like "latest", "-latest", or a bare family name that a vendor
+#     could silently repoint (e.g. use "gpt-5.1-2025-11-13", not "gpt-5.1"
+#     alone, when the vendor offers a dated snapshot).
+#   - id is our internal identifier: it's what ends up in episodes.model_id
+#     and in task/report text. It stays stable even if api_model is later
+#     repointed to a newer snapshot of the "same" model.
+#   - Prices are USD per 1,000,000 tokens, taken from the vendor's own
+#     pricing page for the exact api_model above (standard tier, text
+#     tokens). cost_usd is computed from these plus actual token counts --
+#     never estimated. See docs/models.md for the source and date of each
+#     price, and for the reasoning behind each of the 5 model choices.
+#   - max_turns is an optional override of the harness default (20); omit
+#     to use the default.
+
+models:
+  - id: claude-opus-5
+    provider: anthropic
+    api_model: claude-opus-5
+    input_price_per_million: 5.00
+    output_price_per_million: 25.00
+
+  - id: gpt-5.1
+    provider: openai
+    api_model: gpt-5.1-2025-11-13
+    input_price_per_million: 1.25
+    output_price_per_million: 10.00
+
+  - id: gemini-3.1-pro
+    provider: google
+    api_model: gemini-3.1-pro-preview
+    input_price_per_million: 2.00
+    output_price_per_million: 12.00
+
+  - id: claude-haiku-4.5
+    provider: anthropic
+    api_model: claude-haiku-4-5
+    input_price_per_million: 1.00
+    output_price_per_million: 5.00
+
+  - id: deepseek-v3.2
+    provider: openrouter
+    api_model: deepseek/deepseek-v3.2
+    # UNVERIFIED: OpenRouter's own pricing endpoint (GET /api/v1/models) was
+    # not queried to produce these two numbers -- confirm them there before
+    # running anything that spends real money. See docs/models.md.
+    input_price_per_million: 0.27
+    output_price_per_million: 1.10
