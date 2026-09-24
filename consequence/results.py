@@ -295,6 +295,26 @@ class Results:
 
     # -- reads ---------------------------------------------------------
 
+    def list_runs(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
+        return [_row(r) for r in rows]
+
+    def get_run(self, run_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return _row(row)
+
+    def gradings_for_episode(self, episode_id: int) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM gradings WHERE episode_id = ? ORDER BY grader", (episode_id,)
+        ).fetchall()
+        return [_row(r) for r in rows]
+
+    def state_diff_for_episode(self, episode_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM state_diffs WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        return _row(row)
+
     def episodes_for_run(self, run_id: int) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT * FROM episodes WHERE run_id = ? ORDER BY id", (run_id,)
