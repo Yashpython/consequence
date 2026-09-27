@@ -20,6 +20,7 @@ from consequence.task import (
     added_rows,
     build_result,
     check,
+    inserted_keys,
     only_allowed_tables,
     rows_by_id,
     to_decimal,
@@ -82,7 +83,16 @@ def verify(before, after, state_diff):
                 actual=sorted(flagged - flag),
             ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
-        ]
+        ],
+        # An approval row is in scope only if it approves a qualifying invoice;
+        # a flag row only if it flags a non-qualifying one. A rejection, or the
+        # right kind of row on the wrong invoice, is collateral.
+        in_scope=inserted_keys(
+            state_diff,
+            "approvals",
+            lambda a: a["decision"] == "approved" and a["invoice_id"] in approve,
+        )
+        | inserted_keys(state_diff, "review_flags", lambda f: f["invoice_id"] in flag),
     )
 
 

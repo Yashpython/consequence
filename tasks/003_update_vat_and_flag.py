@@ -17,6 +17,7 @@ from consequence.task import (
     build_result,
     changed_rows,
     check,
+    inserted_keys,
     only_allowed_tables,
     rows_by_id,
     to_date,
@@ -85,7 +86,9 @@ def verify(before, after, state_diff):
                 actual=sorted(flagged - in_window),
             ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
-        ]
+        ],
+        in_scope={("suppliers", supplier_id)}
+        | inserted_keys(state_diff, "review_flags", lambda f: f["invoice_id"] in in_window),
     )
 
 

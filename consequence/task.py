@@ -57,11 +57,20 @@ class Check:
     actual: Any
 
 
+RowKey = tuple[str, Any]  # (table, primary key)
+
+
 @dataclass(frozen=True)
 class VerifyResult:
     passed: bool
     checks: list[Check]
     message: str
+    # Rows this task legitimately may touch, as (table, pk). Consumed by
+    # consequence.collateral: anything the episode touched outside this set is
+    # collateral damage. Inserted rows (new approvals, flags) have ids that
+    # don't exist in `before`, so verifiers derive their part of this from the
+    # diff -- e.g. "new flag rows on a target invoice".
+    in_scope: frozenset[RowKey]
 
     def failed_checks(self) -> list[str]:
         return [c.name for c in self.checks if not c.passed]
@@ -167,11 +176,21 @@ def only_allowed_tables(state_diff: StateDiff, allowed_tables: Iterable[str]) ->
     )
 
 
-def build_result(checks: list[Check]) -> VerifyResult:
+def inserted_keys(
+    state_diff: StateDiff, table: str, keep: Callable[[dict[str, Any]], bool]
+) -> set[RowKey]:
+    """(table, pk) of every row inserted into `table` for which keep(row) is true."""
+    return {(table, row["id"]) for row in added_rows(state_diff, table) if keep(row)}
+
+
+def build_result(checks: list[Check], *, in_scope: Iterable[RowKey]) -> VerifyResult:
+    """in_scope is keyword-only and required: every verifier must declare it."""
     failed = [c.name for c in checks if not c.passed]
     message = (
         f"all {len(checks)} checks passed"
         if not failed
         else f"{len(failed)}/{len(checks)} checks failed: {', '.join(failed)}"
     )
-    return VerifyResult(passed=not failed, checks=checks, message=message)
+    return VerifyResult(
+        passed=not failed, checks=checks, message=message, in_scope=frozenset(in_scope)
+    )

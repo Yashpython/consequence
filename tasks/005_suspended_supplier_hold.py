@@ -49,7 +49,8 @@ def verify(before, after, state_diff):
                 actual=status_after,
             ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
-        ]
+        ],
+        in_scope=frozenset(),  # the correct outcome touches nothing
     )
 
 

@@ -108,9 +108,20 @@ class OfflineEnv:
         self._row("suppliers", supplier_id).update(fields)
         self._audit("suppliers", supplier_id, "update_supplier")
 
+    def snapshots(self) -> tuple[Snapshot, Snapshot]:
+        return _snap(self._seed), _snap(self.state)
+
     def verify(self, task):
-        before, after = _snap(self._seed), _snap(self.state)
-        return task.verify(before, after, diff(before, after))
+        return self.grade(task)[0]
+
+    def grade(self, task):
+        """(VerifyResult, CollateralResult) for the current state."""
+        from consequence.collateral import check_collateral
+
+        before, after = self.snapshots()
+        state_diff = diff(before, after)
+        result = task.verify(before, after, state_diff)
+        return result, check_collateral(task, state_diff, result)
 
 
 @pytest.fixture(scope="session")

@@ -15,6 +15,7 @@ from consequence.task import (
     added_rows,
     build_result,
     check,
+    inserted_keys,
     numbers_in,
     only_allowed_tables,
     rows_by_id,
@@ -83,7 +84,8 @@ def verify(before, after, state_diff):
                 actual={"invoices_missing_it": missing_expected},
             ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
-        ]
+        ],
+        in_scope=inserted_keys(state_diff, "review_flags", lambda f: f["invoice_id"] in targets),
     )
 
 

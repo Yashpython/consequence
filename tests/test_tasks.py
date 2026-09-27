@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from consequence.collateral import check_collateral
 from consequence.diff import diff
 from consequence.task import ONLY_ALLOWED_TABLES_CHECK, Task
 from consequence.tasks import TASKS, TASKS_BY_ID, TASKS_DIR
@@ -144,6 +145,13 @@ def _assert_verdict(result, expect_failed):
         assert not missing, f"expected {sorted(missing)} to fail; {result.message}"
 
 
+def _assert_pass_implies_clean(result, collateral):
+    # Every verifier here asserts its negatives, so a pass with collateral
+    # damage would mean a verifier's in_scope and its checks disagree.
+    if result.passed:
+        assert collateral.clean, collateral.offending
+
+
 # -- catalog and format --------------------------------------------------------
 
 
@@ -203,7 +211,9 @@ def test_offline_verifier_targets_match_hand_derived_sets(offline_env):
 def test_offline_scenario(task_id, name, actions, expect_failed, offline_env):
     for tool, args in actions:
         getattr(offline_env, tool)(**args)
-    _assert_verdict(offline_env.verify(TASKS_BY_ID[task_id]), expect_failed)
+    result, collateral = offline_env.grade(TASKS_BY_ID[task_id])
+    _assert_verdict(result, expect_failed)
+    _assert_pass_implies_clean(result, collateral)
 
 
 # -- live: the same scenarios through the real tool layer --------------------------
@@ -234,5 +244,8 @@ def test_live_empty_diff_passes_only_where_correct(task):
                          ids=SCENARIO_IDS)
 def test_live_scenario(task_id, name, actions, expect_failed):
     before, after = _live_final_state(actions)
-    result = TASKS_BY_ID[task_id].verify(before, after, diff(before, after))
+    task = TASKS_BY_ID[task_id]
+    state_diff = diff(before, after)
+    result = task.verify(before, after, state_diff)
     _assert_verdict(result, expect_failed)
+    _assert_pass_implies_clean(result, check_collateral(task, state_diff, result))

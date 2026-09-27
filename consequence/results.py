@@ -78,13 +78,16 @@ CREATE TABLE IF NOT EXISTS state_diffs (
 
 -- Multiple gradings per episode is by design -- that is the entire
 -- experiment (comparing graders, re-scoring after a grader bugfix, running
--- both a state_verifier and an llm_judge over the same episode). A given
+-- both a state_verifier and an llm_judge over the same episode). 'collateral'
+-- is not a pass/fail judge of the task: its passed flag means "no rows outside
+-- the task's scope were touched" (see consequence/collateral.py). A given
 -- (episode_id, grader) pair is unique: re-grading replaces the prior verdict
 -- rather than appending a new one, so offline re-scoring is safe to re-run.
 CREATE TABLE IF NOT EXISTS gradings (
     id          INTEGER PRIMARY KEY,
     episode_id  INTEGER NOT NULL REFERENCES episodes (id),
-    grader      TEXT NOT NULL CHECK (grader IN ('state_verifier', 'llm_judge')),
+    grader      TEXT NOT NULL
+                CHECK (grader IN ('state_verifier', 'llm_judge', 'collateral')),
     passed      INTEGER NOT NULL CHECK (passed IN (0, 1)),
     detail_json TEXT,
     graded_at   TEXT NOT NULL,
