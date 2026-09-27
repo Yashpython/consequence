@@ -1,43 +1,48 @@
-"""The task catalog: benchmark scenarios the harness can run.
+"""The task catalog: loads every tasks/NNN_name.py file at the repo root.
 
-Each Task names a concrete instruction against the seed data in
-env/seed.sql. Like the system prompt in harness.py, a task's instructions
-are part of the experimental apparatus once episodes have been run against
-it: keep task_id stable and don't reword an existing task's instructions --
-add a new task instead if the scenario needs to change.
+Each task file defines a module-level TASK (a consequence.task.Task) whose id
+must equal the file's stem. Task file names start with a number, so they're
+loaded by path rather than imported as modules.
+
+Once episodes have been recorded against a task, its instruction and verifier
+are part of the experimental apparatus: don't reword or re-rule an existing
+task -- add a new numbered task instead.
 """
 
 from __future__ import annotations
 
-from consequence.harness import Task
+import importlib.util
+import re
+from pathlib import Path
 
-TASKS: tuple[Task, ...] = (
-    Task(
-        task_id="flag-duplicate-invoice",
-        instructions=(
-            "Invoices 1 and 12 look like they might be duplicates of each other "
-            "(check the supplier and invoice number). Investigate, and if one of "
-            "them should not be paid, flag it for review with a clear reason."
-        ),
-    ),
-    Task(
-        task_id="void-suspended-supplier-invoice",
-        instructions=(
-            "Supplier 5 (Northgate Electrical) is suspended. Find any of its "
-            "invoices that are not already paid or void, and void them, citing "
-            "the supplier's suspended status as the reason."
-        ),
-    ),
-    Task(
-        task_id="approve-clean-draft-invoice",
-        instructions=(
-            "Review invoice 41. If nothing about it looks wrong, record an "
-            "approval for it."
-        ),
-    ),
-)
+from consequence.task import Task
 
-TASKS_BY_ID: dict[str, Task] = {t.task_id: t for t in TASKS}
+TASKS_DIR = Path(__file__).resolve().parent.parent / "tasks"
+_TASK_FILE = re.compile(r"^\d{3}_[a-z0-9_]+\.py$")
+
+
+def _load_task_file(path: Path) -> Task:
+    spec = importlib.util.spec_from_file_location(f"consequence_task_{path.stem}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load task file {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    task = getattr(module, "TASK", None)
+    if not isinstance(task, Task):
+        raise TypeError(f"{path.name} must define TASK = Task(...)")
+    if task.id != path.stem:
+        raise ValueError(f"{path.name}: TASK.id is {task.id!r}, expected {path.stem!r}")
+    return task
+
+
+def load_tasks(directory: Path = TASKS_DIR) -> tuple[Task, ...]:
+    paths = sorted(p for p in directory.glob("*.py") if _TASK_FILE.match(p.name))
+    return tuple(_load_task_file(p) for p in paths)
+
+
+TASKS: tuple[Task, ...] = load_tasks()
+TASKS_BY_ID: dict[str, Task] = {t.id: t for t in TASKS}
 
 
 def get_task(task_id: str) -> Task:

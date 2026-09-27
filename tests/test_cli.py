@@ -41,7 +41,7 @@ def _counting_factory(calls: list):
 def test_dry_run_single_task_prints_plan_and_makes_no_calls(db_path, capsys):
     calls: list = []
     rc = main(
-        ["--results-db", db_path, "run", "--task", "flag-duplicate-invoice",
+        ["--results-db", db_path, "run", "--task", "001_void_duplicate",
          "--model", "mock-1", "--dry-run"],
         provider_factory=_counting_factory(calls),
     )
@@ -49,7 +49,7 @@ def test_dry_run_single_task_prints_plan_and_makes_no_calls(db_path, capsys):
     assert calls == []
     out = capsys.readouterr().out
     assert "DRY RUN" in out
-    assert "flag-duplicate-invoice" in out
+    assert "001_void_duplicate" in out
     assert "mock-1" in out
     assert "estimated total cost" in out
 
@@ -68,8 +68,8 @@ def test_dry_run_all_tasks_multiple_models_and_trials(db_path, capsys):
     assert rc == 0
     assert calls == []
     out = capsys.readouterr().out
-    # 3 tasks x 2 models x 2 trials = 12 planned episodes
-    assert out.count("would run:") == 12
+    # 5 tasks x 2 models x 2 trials = 20 planned episodes
+    assert out.count("would run:") == 20
 
 
 def test_run_requires_task_and_model_or_all(db_path):
@@ -217,7 +217,7 @@ def test_env_reset_and_snapshot(capsys):
 @pytest.mark.live
 def test_run_single_task_records_an_episode(db_path, capsys):
     rc = main(
-        ["--results-db", db_path, "run", "--task", "approve-clean-draft-invoice",
+        ["--results-db", db_path, "run", "--task", "005_suspended_supplier_hold",
          "--model", "mock-1"],
         provider_factory=_mock_factory_no_tools,
     )
@@ -231,7 +231,7 @@ def test_run_single_task_records_an_episode(db_path, capsys):
         assert len(runs) == 1
         episodes = results.episodes_for_run(runs[0]["id"])
         assert len(episodes) == 1
-        assert episodes[0]["task_id"] == "approve-clean-draft-invoice"
+        assert episodes[0]["task_id"] == "005_suspended_supplier_hold"
         assert episodes[0]["status"] == "completed"
 
 
@@ -245,7 +245,7 @@ def test_run_is_resumable_and_skips_already_recorded_combos(db_path, capsys):
         return MockProvider(model_id=model_id, script=[TurnResult(text="done", tool_calls=())])
 
     rc = main(
-        ["--results-db", db_path, "run", "--task", "approve-clean-draft-invoice",
+        ["--results-db", db_path, "run", "--task", "005_suspended_supplier_hold",
          "--model", "mock-1", "--trials", "2"],
         provider_factory=counting_mock_factory,
     )
@@ -258,7 +258,7 @@ def test_run_is_resumable_and_skips_already_recorded_combos(db_path, capsys):
     # Re-run against the same run id: both trials already exist, so the
     # provider must not be called again.
     rc = main(
-        ["--results-db", db_path, "run", "--task", "approve-clean-draft-invoice",
+        ["--results-db", db_path, "run", "--task", "005_suspended_supplier_hold",
          "--model", "mock-1", "--trials", "2", "--run-id", str(run_id)],
         provider_factory=counting_mock_factory,
     )
