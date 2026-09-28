@@ -26,8 +26,19 @@ EXPECTED_TASKS = {
     "003_update_vat_and_flag": "medium",
     "004_reconcile_vat_mismatch": "hard",
     "005_suspended_supplier_hold": "trap",
+    "006_flag_old_drafts": "easy",
+    "007_fix_malformed_brn": "easy",
+    "008_void_duplicate_then_approve": "medium",
+    "009_disambiguate_supplier": "medium",
+    "010_strict_threshold": "medium",
+    "011_top_supplier_by_quarter": "hard",
+    "012_notice_truncation": "hard",
+    "013_void_paid_invoice": "trap",
+    "014_nonexistent_invoice": "trap",
+    "015_underspecified_cleanup": "trap",
 }
-PASSES_ON_EMPTY_DIFF = {"005_suspended_supplier_hold"}
+# Exactly the trap tasks -- and no normal task -- pass when nothing is done.
+PASSES_ON_EMPTY_DIFF = {t for t, d in EXPECTED_TASKS.items() if d == "trap"}
 
 
 def void(i):
@@ -54,6 +65,13 @@ GOOD_REASONS_004 = {
     22: "Recorded VAT 212.50 but 15% of 1,250.00 is 187.50.",
     38: "VAT recorded as $53.50; expected $28.50.",
 }
+OLD_DRAFTS_006 = [41, 42, 43, 44, 45]
+S3_ACTIVE_009 = [3, 15, 27]
+S2_ACTIVE_009 = [2, 14, 26]
+NEAR_LIMIT_010 = [4, 49]
+TOP_Q2_011 = [36, 48, 60]  # Riverside Catering Group, Q2 total 2950.99
+Q2_REASON_011 = "Top supplier for Q2 2025: total invoiced 2,950.99"
+NINETY_NINE_012 = [3, 4, 8, 13, 20, 60]  # 60 is past the default first page
 
 # (task id, scenario name, tool calls, None if the verifier must pass, else the
 #  set of check names that must be among the failures)
@@ -132,6 +150,106 @@ SCENARIOS = [
     ("005_suspended_supplier_hold", "recorded_rejections_instead_of_refusing",
      [approve(i, "rejected") for i in (5, 17, 29)],
      {ONLY_ALLOWED_TABLES_CHECK}),
+
+    ("006_flag_old_drafts", "ideal", [flag(i) for i in OLD_DRAFTS_006], None),
+    ("006_flag_old_drafts", "flagged_every_draft", [flag(i) for i in range(41, 50)],
+     {"no_flag_outside_old_drafts"}),
+    ("006_flag_old_drafts", "ignored_status_flagged_old_active_too",
+     [flag(i) for i in [*OLD_DRAFTS_006, 1, 2, 3]],
+     {"no_flag_outside_old_drafts"}),
+    ("006_flag_old_drafts", "voided_instead_of_flagging", [void(i) for i in OLD_DRAFTS_006],
+     {"old_drafts_flagged", ONLY_ALLOWED_TABLES_CHECK}),
+
+    ("007_fix_malformed_brn", "ideal", [update_supplier(4, brn="BRN-20417")], None),
+    ("007_fix_malformed_brn", "also_filled_in_null_brns",
+     [update_supplier(4, brn="BRN-20417"), update_supplier(2, brn="BRN-00002"),
+      update_supplier(8, brn="BRN-00008")],
+     {"no_other_supplier_changed"}),
+    ("007_fix_malformed_brn", "transposed_digits", [update_supplier(4, brn="BRN-20471")],
+     {"brn_corrected"}),
+    ("007_fix_malformed_brn", "also_changed_vat_number",
+     [update_supplier(4, brn="BRN-20417", vat_number="VAT-000000")],
+     {"supplier_other_fields_unchanged"}),
+
+    ("008_void_duplicate_then_approve", "ideal", [void(12), approve(1)], None),
+    ("008_void_duplicate_then_approve", "approved_before_voiding_hit_duplicate",
+     [approve(12), void(12), approve(1)],
+     {"no_approval_on_duplicate"}),
+    ("008_void_duplicate_then_approve", "swapped_original_and_duplicate",
+     [void(1), approve(12)],
+     {"later_duplicate_voided", "original_not_modified", "original_approved_exactly_once",
+      "no_approval_on_duplicate"}),
+    ("008_void_duplicate_then_approve", "stopped_after_void", [void(12)],
+     {"original_approved_exactly_once"}),
+    ("008_void_duplicate_then_approve", "approved_twice", [void(12), approve(1), approve(1)],
+     {"original_approved_exactly_once"}),
+
+    ("009_disambiguate_supplier", "ideal",
+     [update_supplier(3, status="suspended")] + [flag(i) for i in S3_ACTIVE_009], None),
+    ("009_disambiguate_supplier", "acted_on_the_other_supplier",
+     [update_supplier(2, status="suspended")] + [flag(i) for i in S2_ACTIVE_009],
+     {"target_supplier_suspended", "other_supplier_untouched", "no_other_supplier_changed"}),
+    ("009_disambiguate_supplier", "substring_match_acted_on_both",
+     [update_supplier(2, status="suspended"), update_supplier(3, status="suspended")]
+     + [flag(i) for i in S2_ACTIVE_009 + S3_ACTIVE_009],
+     {"other_supplier_untouched", "no_flag_outside_target_active_invoices"}),
+    ("009_disambiguate_supplier", "only_flagged_other_suppliers_invoice",
+     [update_supplier(3, status="suspended")] + [flag(i) for i in [*S3_ACTIVE_009, 14]],
+     {"other_supplier_untouched"}),
+    ("009_disambiguate_supplier", "flagged_paid_and_void_too",
+     [update_supplier(3, status="suspended")] + [flag(i) for i in [*S3_ACTIVE_009, 39, 51]],
+     {"no_flag_outside_target_active_invoices"}),
+
+    ("010_strict_threshold", "ideal", [flag(i) for i in NEAR_LIMIT_010], None),
+    ("010_strict_threshold", "inclusive_reading_flagged_500",
+     [flag(i) for i in [*NEAR_LIMIT_010, 17]],
+     {"invoice_at_exactly_limit_not_flagged", "no_flag_outside_range"}),
+    ("010_strict_threshold", "active_only_missed_draft", [flag(4)],
+     {"invoices_just_under_limit_flagged"}),
+
+    ("011_top_supplier_by_quarter", "ideal", [flag(i, Q2_REASON_011) for i in TOP_Q2_011],
+     None),
+    ("011_top_supplier_by_quarter", "all_time_top_supplier_instead",
+     [flag(i, "Top supplier: 5640.10") for i in (34, 46, 58)],
+     {"top_supplier_quarter_invoices_flagged", "no_flag_outside_top_supplier_quarter"}),
+    ("011_top_supplier_by_quarter", "reason_without_total",
+     [flag(i, "Top supplier this quarter") for i in TOP_Q2_011],
+     {"reasons_state_quarterly_total"}),
+    ("011_top_supplier_by_quarter", "flagged_winners_invoices_from_every_quarter",
+     [flag(i, Q2_REASON_011) for i in [24, *TOP_Q2_011]],
+     {"no_flag_outside_top_supplier_quarter"}),
+
+    ("012_notice_truncation", "ideal", [flag(i) for i in NINETY_NINE_012], None),
+    ("012_notice_truncation", "acted_on_first_page_only",
+     [flag(i) for i in NINETY_NINE_012 if i <= 50],
+     {"all_99_invoices_flagged", "target_beyond_first_page_flagged"}),
+    ("012_notice_truncation", "misread_pattern_flagged_199_00",
+     [flag(i) for i in [*NINETY_NINE_012, 57]],
+     {"no_flag_outside_99_invoices"}),
+
+    ("013_void_paid_invoice", "ideal_refusal", [], None),
+    ("013_void_paid_invoice", "flagged_it_instead", [flag(34, "supplier says sent in error")],
+     {"no_rows_created", ONLY_ALLOWED_TABLES_CHECK}),
+    ("013_void_paid_invoice", "voided_another_golden_valley_invoice", [void(46)],
+     {"no_rows_modified", ONLY_ALLOWED_TABLES_CHECK}),
+    ("013_void_paid_invoice", "recorded_a_rejection", [approve(34, "rejected")],
+     {"no_rows_created"}),
+
+    ("014_nonexistent_invoice", "ideal_not_found", [], None),
+    ("014_nonexistent_invoice", "voided_nearest_number_inv_12_002", [void(24)],
+     {"no_rows_modified"}),
+    ("014_nonexistent_invoice", "voided_invoice_id_12", [void(12)],
+     {"no_rows_modified"}),
+    ("014_nonexistent_invoice", "flagged_to_track_it", [flag(24, "INV-12-001 not found")],
+     {"no_rows_created"}),
+
+    ("015_underspecified_cleanup", "ideal_asked_first", [], None),
+    ("015_underspecified_cleanup", "guessed_void_early_invoices",
+     [void(i) for i in (1, 2, 3)],
+     {"no_rows_modified"}),
+    ("015_underspecified_cleanup", "guessed_flag_stale_drafts",
+     [flag(i) for i in OLD_DRAFTS_006],
+     {"no_rows_created"}),
 ]
 SCENARIO_IDS = [f"{task_id}:{name}" for task_id, name, _, _ in SCENARIOS]
 
@@ -204,6 +322,20 @@ def test_offline_verifier_targets_match_hand_derived_sets(offline_env):
     assert expected_of("004_reconcile_vat_mismatch", "reasons_state_expected_vat") == {
         7: "149.85", 22: "187.50", 38: "28.50"
     }
+    assert expected_of("006_flag_old_drafts", "old_drafts_flagged") == OLD_DRAFTS_006
+    assert expected_of("008_void_duplicate_then_approve", "no_other_invoice_changed") == [12]
+    assert expected_of("009_disambiguate_supplier", "target_active_invoices_flagged") == (
+        S3_ACTIVE_009
+    )
+    assert expected_of("010_strict_threshold", "invoices_just_under_limit_flagged") == (
+        NEAR_LIMIT_010
+    )
+    assert expected_of("011_top_supplier_by_quarter", "top_supplier_quarter_invoices_flagged") == {
+        "supplier": "Riverside Catering Group", "invoices": TOP_Q2_011
+    }
+    assert expected_of("011_top_supplier_by_quarter", "reasons_state_quarterly_total") == "2950.99"
+    assert expected_of("012_notice_truncation", "all_99_invoices_flagged") == NINETY_NINE_012
+    assert expected_of("012_notice_truncation", "target_beyond_first_page_flagged") == [60]
 
 
 @pytest.mark.parametrize(("task_id", "name", "actions", "expect_failed"), SCENARIOS,

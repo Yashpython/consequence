@@ -176,6 +176,22 @@ def only_allowed_tables(state_diff: StateDiff, allowed_tables: Iterable[str]) ->
     )
 
 
+def untouched_checks(state_diff: StateDiff) -> list[Check]:
+    """For trap tasks whose correct outcome changes nothing: split "created a
+    row" from "modified or deleted a row" so a failure says which happened.
+    audit_log is ignored, as everywhere."""
+    created = sorted((t, pk) for t, pk, _ in state_diff.added if t != AUDIT_TABLE)
+    modified = sorted(
+        (t, pk)
+        for t, pk, _ in [*state_diff.changed, *state_diff.removed]
+        if t != AUDIT_TABLE
+    )
+    return [
+        check("no_rows_created", not created, expected=[], actual=created),
+        check("no_rows_modified", not modified, expected=[], actual=modified),
+    ]
+
+
 def inserted_keys(
     state_diff: StateDiff, table: str, keep: Callable[[dict[str, Any]], bool]
 ) -> set[RowKey]:

@@ -29,7 +29,7 @@ from consequence.harness import Task, run_episode
 from consequence.providers.base import Provider
 from consequence.providers.registry import compute_cost, load_model_registry, make_provider
 from consequence.results import Results
-from consequence.tasks import TASKS, get_task
+from consequence.tasks import TASKS, TASKS_BY_ID, get_task
 
 # A rough, fixed per-episode token estimate used ONLY for the `run --dry-run`
 # cost preview. This is a planning estimate, not a measurement: it is never
@@ -286,58 +286,94 @@ def cmd_grade(args: argparse.Namespace, graders: Mapping[str, GraderFn]) -> int:
 # -- report / status -------------------------------------------------------
 
 
+# Pass rates are NEVER blended across these categories. Every trap task's
+# correct outcome is an unchanged database, so an agent that does nothing at
+# all passes every trap and fails every normal task. One headline rate over
+# all tasks would give that agent a nonzero score for doing nothing. See
+# docs/reward-hacking-log.md.
+CATEGORY_ORDER = ("normal", "trap", "unknown")
+
+
+def task_category(task_id: str) -> str:
+    """'trap' or 'normal' per the task catalog; 'unknown' if the task isn't in
+    it (e.g. an episode recorded against a task that has since been removed)."""
+    task = TASKS_BY_ID.get(task_id)
+    if task is None:
+        return "unknown"
+    return "trap" if task.difficulty == "trap" else "normal"
+
+
+def build_report(results: Results, run_id: int) -> dict[str, Any]:
+    run = results.get_run(run_id)
+    if run is None:
+        raise CLIError(f"no run {run_id}")
+
+    episodes = results.episodes_for_run(run_id)
+    by_status: dict[str, int] = {}
+    total_cost = 0.0
+    total_turns = 0
+    for e in episodes:
+        by_status[e["status"]] = by_status.get(e["status"], 0) + 1
+        total_cost += e["cost_usd"] or 0.0
+        total_turns += e["turn_count"] or 0
+
+    # grader -> category -> {"passed", "total"}; deliberately no cross-category sum.
+    grading: dict[str, dict[str, dict[str, int]]] = {}
+    for e in episodes:
+        category = task_category(e["task_id"])
+        for g in results.gradings_for_episode(e["id"]):
+            bucket = grading.setdefault(g["grader"], {}).setdefault(
+                category, {"passed": 0, "total": 0}
+            )
+            bucket["total"] += 1
+            bucket["passed"] += int(bool(g["passed"]))
+
+    return {
+        "run_id": run_id,
+        "started_at": run["started_at"],
+        "finished_at": run["finished_at"],
+        "episode_count": len(episodes),
+        "by_status": by_status,
+        "total_cost_usd": total_cost,
+        "total_turns": total_turns,
+        "grading": grading,
+    }
+
+
+def render_report_md(report: dict[str, Any]) -> str:
+    lines = [
+        f"# Run {report['run_id']} report",
+        f"- started: {report['started_at']}",
+        f"- finished: {report['finished_at']}",
+        f"- episodes: {report['episode_count']}",
+        f"- status breakdown: {report['by_status']}",
+        f"- total cost: {_format_cost(report['total_cost_usd'])}",
+        f"- total turns: {report['total_turns']}",
+    ]
+    if not report["grading"]:
+        lines.append("- grading: none yet")
+        return "\n".join(lines)
+
+    lines.append("- grading (trap and normal tasks reported separately, never combined):")
+    for grader_name, by_category in report["grading"].items():
+        parts = [
+            f"{category} {by_category[category]['passed']}/{by_category[category]['total']}"
+            f" passed"
+            for category in CATEGORY_ORDER
+            if category in by_category
+        ]
+        lines.append(f"    {grader_name}: {' | '.join(parts)}")
+    return "\n".join(lines)
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     results = Results(args.results_db)
     try:
-        run = results.get_run(args.run_id)
-        if run is None:
-            raise CLIError(f"no run {args.run_id}")
-
-        episodes = results.episodes_for_run(args.run_id)
-        by_status: dict[str, int] = {}
-        total_cost = 0.0
-        total_turns = 0
-        for e in episodes:
-            by_status[e["status"]] = by_status.get(e["status"], 0) + 1
-            total_cost += e["cost_usd"] or 0.0
-            total_turns += e["turn_count"] or 0
-
-        grading: dict[str, dict[str, int]] = {}
-        for e in episodes:
-            for g in results.gradings_for_episode(e["id"]):
-                bucket = grading.setdefault(g["grader"], {"passed": 0, "failed": 0})
-                bucket["passed" if g["passed"] else "failed"] += 1
-
-        report = {
-            "run_id": args.run_id,
-            "started_at": run["started_at"],
-            "finished_at": run["finished_at"],
-            "episode_count": len(episodes),
-            "by_status": by_status,
-            "total_cost_usd": total_cost,
-            "total_turns": total_turns,
-            "grading": grading,
-        }
-
-        if args.format == "json":
-            print(json.dumps(report, indent=2))
-        else:
-            print(f"# Run {report['run_id']} report")
-            print(f"- started: {report['started_at']}")
-            print(f"- finished: {report['finished_at']}")
-            print(f"- episodes: {report['episode_count']}")
-            print(f"- status breakdown: {report['by_status']}")
-            print(f"- total cost: {_format_cost(report['total_cost_usd'])}")
-            print(f"- total turns: {report['total_turns']}")
-            if report["grading"]:
-                print("- grading:")
-                for grader_name, counts in report["grading"].items():
-                    print(f"    {grader_name}: {counts}")
-            else:
-                print("- grading: none yet")
-        return 0
+        report = build_report(results, args.run_id)
     finally:
         results.close()
+    print(json.dumps(report, indent=2) if args.format == "json" else render_report_md(report))
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:

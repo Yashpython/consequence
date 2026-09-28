@@ -12,9 +12,11 @@ import json
 import pytest
 
 from consequence.cli import main
+from consequence.diff import diff
 from consequence.providers.base import TurnResult
 from consequence.providers.mock import MockProvider
 from consequence.results import Results
+from consequence.tasks import TASKS
 
 
 @pytest.fixture
@@ -68,8 +70,8 @@ def test_dry_run_all_tasks_multiple_models_and_trials(db_path, capsys):
     assert rc == 0
     assert calls == []
     out = capsys.readouterr().out
-    # 5 tasks x 2 models x 2 trials = 20 planned episodes
-    assert out.count("would run:") == 20
+    # 15 tasks x 2 models x 2 trials = 60 planned episodes
+    assert out.count("would run:") == 60
 
 
 def test_run_requires_task_and_model_or_all(db_path):
@@ -176,7 +178,8 @@ def test_report_json_reflects_persisted_rows(db_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["episode_count"] == 2
     assert report["by_status"] == {"completed": 2}
-    assert report["grading"]["state_verifier"] == {"passed": 1, "failed": 1}
+    # t1/t2 aren't catalog tasks, so they report under "unknown"
+    assert report["grading"]["state_verifier"] == {"unknown": {"passed": 1, "total": 2}}
 
 
 def test_report_unknown_run_is_a_clean_error(db_path):
@@ -269,3 +272,36 @@ def test_run_is_resumable_and_skips_already_recorded_combos(db_path, capsys):
 
     with Results(db_path) as results:
         assert len(results.episodes_for_run(run_id)) == 2  # not duplicated
+
+
+# -- do-nothing agent: trap and normal pass rates are never blended ----------------
+
+
+def test_do_nothing_agent_is_reported_split_not_blended(db_path, offline_env, capsys):
+    """Every trap task passes on an empty diff, so an agent that does nothing
+    passes all 4 traps and none of the 11 normal tasks. A blended headline
+    would call that 4/15 (27%) for doing nothing; the report must never show one."""
+    before, after = offline_env.snapshots()
+    nothing = diff(before, after)
+    with Results(db_path) as results:
+        run_id = results.start_run(notes="do-nothing agent")
+        for task in TASKS:
+            episode_id = results.record_episode(
+                run_id=run_id, task_id=task.id, model_id="do-nothing", trial_index=0,
+                status="completed",
+            )
+            verdict = task.verify(before, after, nothing)
+            results.record_grading(episode_id, "state_verifier", passed=verdict.passed)
+
+    assert main(["--results-db", db_path, "report", "--run", str(run_id), "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["grading"]["state_verifier"] == {
+        "normal": {"passed": 0, "total": 11},
+        "trap": {"passed": 4, "total": 4},
+    }
+
+    assert main(["--results-db", db_path, "report", "--run", str(run_id)]) == 0
+    md = capsys.readouterr().out
+    assert "state_verifier: normal 0/11 passed | trap 4/4 passed" in md
+    assert "4/15" not in md
+    assert "/15" not in md  # no figure over all 15 tasks, in any form
