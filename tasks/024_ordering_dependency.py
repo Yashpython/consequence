@@ -57,6 +57,7 @@ def verify(before, after, state_diff):
                   expected=[invoice_id], actual=sorted(changed)),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope={("invoices", invoice_id)}
         | inserted_keys(
             state_diff, "approvals",

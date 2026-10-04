@@ -66,6 +66,7 @@ def verify(before, after, state_diff):
             ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope={("invoices", duplicate["id"])},
     )
 

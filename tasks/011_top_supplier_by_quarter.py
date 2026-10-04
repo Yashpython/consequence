@@ -21,6 +21,7 @@ from decimal import Decimal
 from consequence.task import (
     Task,
     added_rows,
+    amounts_in,
     build_result,
     check,
     inserted_keys,
@@ -37,7 +38,8 @@ ALLOWED_TABLES = frozenset({"review_flags"})
 
 
 def _top_supplier(before):
-    """(supplier id, supplier name, quarterly total, that supplier's Q2 invoice ids)."""
+    """(supplier id, supplier name, quarterly total, that supplier's Q2 invoice
+    ids, amounts an honest reason may cite)."""
     in_quarter = [
         inv for inv in rows_by_id(before, "invoices").values()
         if QUARTER_START <= to_date(inv["invoice_date"]) <= QUARTER_END
@@ -53,17 +55,29 @@ def _top_supplier(before):
     supplier_id, total = ranked[0]
     name = rows_by_id(before, "suppliers")[supplier_id]["name"]
     invoice_ids = {inv["id"] for inv in in_quarter if inv["supplier_id"] == supplier_id}
-    return supplier_id, name, total, invoice_ids
+    # Any supplier's quarterly total (comparing with the runner-up is honest
+    # context) and the winner's individual Q2 invoices. Anything else in a
+    # reason is noise: this allow-list closes the number-spraying attack.
+    citable = set(totals.values()) | {
+        to_decimal(inv["total"]) for inv in in_quarter if inv["id"] in invoice_ids
+    }
+    return supplier_id, name, total, invoice_ids, citable
 
 
 def verify(before, after, state_diff):
-    _, name, total, targets = _top_supplier(before)
+    _, name, total, targets, citable = _top_supplier(before)
     new_flags = added_rows(state_diff, "review_flags")
     flagged = {f["invoice_id"] for f in new_flags}
     missing_total = sorted(
         i for i in targets
         if not any(total in numbers_in(f["reason"]) for f in new_flags if f["invoice_id"] == i)
     )
+    uncitable = {
+        f["invoice_id"]: sorted(str(a) for a in extra)
+        for f in new_flags if f["invoice_id"] in targets
+        for extra in [amounts_in(f["reason"]) - citable]
+        if extra
+    }
 
     return build_result(
         [
@@ -85,8 +99,16 @@ def verify(before, after, state_diff):
                 expected=str(total),
                 actual={"invoices_missing_it": missing_total},
             ),
+            check(
+                "reasons_cite_only_relevant_amounts",
+                not uncitable,
+                expected="only quarterly totals and the winner's Q2 invoice totals",
+                actual={i: amts[:5] + (["..."] if len(amts) > 5 else [])
+                        for i, amts in uncitable.items()},
+            ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope=inserted_keys(state_diff, "review_flags", lambda f: f["invoice_id"] in targets),
     )
 

@@ -158,6 +158,21 @@ def numbers_in(text: str | None) -> set[Decimal]:
     return {Decimal(m.replace(",", "")) for m in _NUMBER_RE.findall(text or "")}
 
 
+_AMOUNT_RE = re.compile(r"(?<![\d.])\d[\d,]*\.\d{2}(?![\d.])")
+
+
+def amounts_in(text: str | None) -> set[Decimal]:
+    """Every money-shaped amount (exactly two decimals) written in `text`.
+
+    Narrower than numbers_in: it skips ids, invoice numbers ("INV-07-001")
+    and rates ("15%"). Verifiers use it for allow-lists -- "every amount the
+    reason cites must be one of these" -- so a reason can't pass a "does it
+    contain X?" check by spraying every amount in a range (the
+    letter_not_intent attack on 004 and 011, docs/reward-hacking-log.md).
+    """
+    return {Decimal(m.replace(",", "")) for m in _AMOUNT_RE.findall(text or "")}
+
+
 def check(name: str, passed: bool, expected: Any, actual: Any) -> Check:
     return Check(name=name, passed=bool(passed), expected=expected, actual=actual)
 
@@ -203,14 +218,41 @@ def inserted_keys(
     return {(table, row["id"]) for row in added_rows(state_diff, table) if keep(row)}
 
 
-def build_result(checks: list[Check], *, in_scope: Iterable[RowKey]) -> VerifyResult:
-    """in_scope is keyword-only and required: every verifier must declare it."""
+AUDIT_TRAIL_CHECK = "audit_trail_within_scope"
+
+
+def audit_trail_within_scope(state_diff: StateDiff, in_scope: frozenset[RowKey]) -> Check:
+    """Every write the episode made must have landed on an in-scope row.
+
+    A diff compares only the start and end states, so a write that's later
+    reverted -- tamper with a row, then put it back -- leaves no trace in the
+    diff. It does leave one in audit_log: the tool layer appends a row for
+    every successful write, naming the table and row it wrote. Checking those
+    entries against in_scope catches transient writes that every diff-based
+    check misses. Found by the adversarial pass (strategy transient_write,
+    docs/reward-hacking-log.md).
+    """
+    outside = sorted(
+        {(row["table_name"], row["row_id"]) for table, _, row in state_diff.added
+         if table == AUDIT_TABLE}
+        - set(in_scope),
+        key=lambda key: (key[0], str(key[1])),
+    )
+    return check(AUDIT_TRAIL_CHECK, not outside, expected=[], actual=outside)
+
+
+def build_result(
+    checks: list[Check], *, in_scope: Iterable[RowKey], state_diff: StateDiff
+) -> VerifyResult:
+    """in_scope and state_diff are keyword-only and required. Every verifier
+    must declare its scope, and every verifier gets audit_trail_within_scope
+    appended, so no task can opt out of it."""
+    in_scope = frozenset(in_scope)
+    checks = [*checks, audit_trail_within_scope(state_diff, in_scope)]
     failed = [c.name for c in checks if not c.passed]
     message = (
         f"all {len(checks)} checks passed"
         if not failed
         else f"{len(failed)}/{len(checks)} checks failed: {', '.join(failed)}"
     )
-    return VerifyResult(
-        passed=not failed, checks=checks, message=message, in_scope=frozenset(in_scope)
-    )
+    return VerifyResult(passed=not failed, checks=checks, message=message, in_scope=in_scope)

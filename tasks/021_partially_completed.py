@@ -72,6 +72,7 @@ def verify(before, after, state_diff):
                   expected=sorted(to_update), actual=sorted(changes)),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope={("suppliers", sid) for sid in to_update},
     )
 

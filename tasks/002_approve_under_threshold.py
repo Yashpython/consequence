@@ -87,6 +87,7 @@ def verify(before, after, state_diff):
         # An approval row is in scope only if it approves a qualifying invoice;
         # a flag row only if it flags a non-qualifying one. A rejection, or the
         # right kind of row on the wrong invoice, is collateral.
+        state_diff=state_diff,
         in_scope=inserted_keys(
             state_diff,
             "approvals",

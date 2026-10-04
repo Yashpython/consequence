@@ -124,8 +124,8 @@ def test_offline_verifier_targets_match_hand_derived_sets(offline_env):
                          ids=SCENARIO_IDS)
 def test_offline_scenario(task_id, name, actions, expect_failed, offline_env):
     for tool, args, *marker in actions:
-        if marker != [REFUSED]:  # a refused call changes nothing
-            getattr(offline_env, tool)(**args)
+        result = offline_env.call_tool(tool, args)
+        assert result["ok"] == (marker != [REFUSED]), (tool, args, result["error"])
     result, collateral = offline_env.grade(TASKS_BY_ID[task_id])
     _assert_verdict(result, expect_failed)
     _assert_pass_implies_clean(result, collateral)

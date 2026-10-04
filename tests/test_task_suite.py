@@ -41,8 +41,7 @@ def _scenarios_for(task_id):
 
 def _apply(env, actions):
     for tool, args, *marker in actions:
-        if marker != [REFUSED]:
-            getattr(env, tool)(**args)
+        assert env.call_tool(tool, args)["ok"] == (marker != [REFUSED])
 
 
 # -- size and uniqueness -------------------------------------------------------

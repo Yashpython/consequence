@@ -13,6 +13,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from consequence.task import (
     Task,
     added_rows,
+    amounts_in,
     build_result,
     check,
     inserted_keys,
@@ -39,6 +40,16 @@ def _mismatches(before):
     return out
 
 
+def _citable_amounts(invoice, recorded, expected):
+    """Every amount an honest discrepancy reason for this invoice might cite:
+    recorded and expected VAT, the total, the difference, either net figure,
+    and the rate written as 0.15. Anything else in the reason is noise -- the
+    allow-list that closes the number-spraying attack."""
+    total = to_decimal(invoice["total"])
+    return {recorded, expected, total, abs(recorded - expected),
+            total - recorded, total - expected, RATE}
+
+
 def verify(before, after, state_diff):
     mismatches = _mismatches(before)
     targets = set(mismatches)
@@ -56,6 +67,14 @@ def verify(before, after, state_diff):
         i for i, (_, expected) in mismatches.items()
         if not any(expected in nums for nums in reason_numbers(i))
     )
+    invoices = rows_by_id(before, "invoices")
+    uncitable = {
+        f["invoice_id"]: sorted(str(a) for a in extra)
+        for f in new_flags if f["invoice_id"] in mismatches
+        for extra in [amounts_in(f["reason"])
+                      - _citable_amounts(invoices[f["invoice_id"]], *mismatches[f["invoice_id"]])]
+        if extra
+    }
 
     return build_result(
         [
@@ -83,8 +102,16 @@ def verify(before, after, state_diff):
                 expected={i: str(e) for i, (_, e) in sorted(mismatches.items())},
                 actual={"invoices_missing_it": missing_expected},
             ),
+            check(
+                "reasons_cite_only_this_invoices_amounts",
+                not uncitable,
+                expected="only recorded/expected VAT, total, difference, net, rate",
+                actual={i: amts[:5] + (["..."] if len(amts) > 5 else [])
+                        for i, amts in uncitable.items()},
+            ),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope=inserted_keys(state_diff, "review_flags", lambda f: f["invoice_id"] in targets),
     )
 

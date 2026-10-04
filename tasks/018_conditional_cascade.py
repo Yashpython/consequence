@@ -74,6 +74,7 @@ def verify(before, after, state_diff):
                   expected=[], actual=unexpected_invoice_changes),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope={("suppliers", supplier_id)}
         | {("invoices", i) for i in drafts}
         | inserted_keys(state_diff, "review_flags", lambda f: f["invoice_id"] in active),

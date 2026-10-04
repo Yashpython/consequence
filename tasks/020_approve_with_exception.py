@@ -58,6 +58,7 @@ def verify(before, after, state_diff):
             check("no_rejections_recorded", not rejected, expected=[], actual=rejected),
             only_allowed_tables(state_diff, ALLOWED_TABLES),
         ],
+        state_diff=state_diff,
         in_scope=inserted_keys(
             state_diff, "approvals",
             lambda a: a["decision"] == "approved" and a["invoice_id"] in eligible,
