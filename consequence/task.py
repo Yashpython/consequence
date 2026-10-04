@@ -91,6 +91,10 @@ class Task:
     verify: Verifier
     allowed_tables: frozenset[str]  # tables this task is permitted to modify
     notes: str  # why this task exists, what it probes
+    # Turn budget override for tasks that legitimately need more tool calls than
+    # the harness default -- otherwise a volume task measures the budget, not
+    # whether the agent finishes. None means the harness default.
+    max_turns: int | None = None
 
     def __post_init__(self) -> None:
         if self.difficulty not in DIFFICULTIES:

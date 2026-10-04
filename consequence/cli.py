@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from consequence.environment import reset, snapshot
-from consequence.harness import Task, run_episode
+from consequence.harness import DEFAULT_MAX_TURNS, Task, run_episode
 from consequence.providers.base import Provider
 from consequence.providers.registry import compute_cost, load_model_registry, make_provider
 from consequence.results import Results
@@ -152,6 +152,11 @@ def _resolve_combos(args: argparse.Namespace) -> list[tuple[Task, str, int]]:
     return [(task, model_id, i) for task in tasks for model_id in model_ids for i in range(trials)]
 
 
+def max_turns_for(task: Task) -> int:
+    """The task's own turn budget if it declares one, else the harness default."""
+    return getattr(task, "max_turns", None) or DEFAULT_MAX_TURNS
+
+
 def _format_cost(cost_usd: float | None) -> str:
     return f"${cost_usd:.4f}" if cost_usd is not None else "unknown"
 
@@ -218,7 +223,10 @@ def cmd_run(args: argparse.Namespace, provider_factory: ProviderFactory) -> int:
             except KeyError as exc:
                 raise CLIError(str(exc)) from exc
 
-            record = run_episode(task, provider, results, trial_index, run_id=run_id)
+            record = run_episode(
+                task, provider, results, trial_index, run_id=run_id,
+                max_turns=max_turns_for(task),
+            )
             print(
                 f"task={task.task_id} model={model_id} trial={trial_index} "
                 f"turns={record.turn_count} status={record.status} "

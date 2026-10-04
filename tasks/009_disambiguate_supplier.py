@@ -93,8 +93,8 @@ TASK = Task(
     difficulty="medium",
     instruction=(
         f"{TARGET_NAME} has been suspended pending a contract review. Set that "
-        "supplier's status to 'suspended', and flag each of its invoices that are "
-        "currently in 'active' status for review."
+        "supplier's status to 'suspended', and flag for review each of its invoices "
+        "whose status is 'active'."
     ),
     verify=verify,
     allowed_tables=ALLOWED_TABLES,

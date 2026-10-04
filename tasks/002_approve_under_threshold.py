@@ -101,7 +101,7 @@ TASK = Task(
     title="Approve small invoices from suppliers in good standing",
     difficulty="medium",
     instruction=(
-        "Process this week's small-invoice approvals. Consider every invoice whose "
+        "Process the pending small-invoice approvals. Consider every invoice whose "
         "status is 'active' and whose total is under 500.00. For each of those: if "
         "its supplier's status is 'active' and the supplier has a valid business "
         "registration number (a valid BRN is 'BRN-' followed only by digits, for "

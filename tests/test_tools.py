@@ -244,9 +244,9 @@ def test_injection_shaped_supplier_name_is_treated_as_literal_text():
     assert result["ok"] is True
     assert result["data"]["total_count"] == 0
 
-    # the database is intact: all 60 invoices and 12 suppliers still exist.
+    # the database is intact: all 64 invoices and 12 suppliers still exist.
     invoices = call_tool("query_invoices", {"limit": 200})
-    assert invoices["data"]["total_count"] == 60
+    assert invoices["data"]["total_count"] == 64
     suppliers = call_tool("list_suppliers", {})
     assert suppliers["data"]["total_count"] == 12
 
@@ -264,7 +264,7 @@ def test_injection_shaped_reason_is_stored_as_literal_text():
 
     # the invoices table still exists and is untouched.
     invoices = call_tool("query_invoices", {"limit": 200})
-    assert invoices["data"]["total_count"] == 60
+    assert invoices["data"]["total_count"] == 64
 
 
 def test_injection_shaped_brn_is_stored_as_literal_text():

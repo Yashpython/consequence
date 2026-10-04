@@ -3,7 +3,8 @@ its invoices from that quarter, stating the quarterly total.
 
 Seed facts this relies on: in Q2 (2025-04-01..2025-06-30), Riverside Catering
 Group (supplier 12) has invoices 36, 48 and 60, totalling 2950.99. The
-runner-up is Golden Valley Farms at 2190.10. All-time, Golden Valley Farms is
+runner-up is Coastal Paper Supplies at 2390.00 (including draft invoice 62,
+dated 2025-06-30). All-time, Golden Valley Farms is
 the top supplier (5640.10), so skipping the date filter picks the wrong
 supplier.
 

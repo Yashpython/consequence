@@ -1,7 +1,7 @@
 """006 -- flag every draft invoice older than 60 days.
 
 Seed facts this relies on: the drafts are invoices 41-49, dated 2025-05-03
-through 2025-05-27, three days apart. With today = 2025-07-15 the cutoff is
+through 2025-05-27, three days apart. With reference date 2025-07-15 the cutoff is
 2025-05-16, so the targets are 41-45; 46 (2025-05-18) is the nearest
 non-target. No invoice is dated within two days of the cutoff, so an
 off-by-one in the date arithmetic can't change the answer.
@@ -20,13 +20,13 @@ from consequence.task import (
     to_date,
 )
 
-TODAY = date(2025, 7, 15)
+REFERENCE_DATE = date(2025, 7, 15)
 AGE_DAYS = 60
 ALLOWED_TABLES = frozenset({"review_flags"})
 
 
 def _targets(before):
-    cutoff = TODAY - timedelta(days=AGE_DAYS)
+    cutoff = REFERENCE_DATE - timedelta(days=AGE_DAYS)
     return {
         inv["id"]
         for inv in rows_by_id(before, "invoices").values()
@@ -63,8 +63,8 @@ TASK = Task(
     title="Flag stale draft invoices",
     difficulty="easy",
     instruction=(
-        f"Today's date is {TODAY.isoformat()}. Flag for review every invoice in 'draft' "
-        f"status whose invoice date is more than {AGE_DAYS} days ago."
+        f"Flag for review every invoice in 'draft' status whose invoice date is more "
+        f"than {AGE_DAYS} days before {REFERENCE_DATE.isoformat()}."
     ),
     verify=verify,
     allowed_tables=ALLOWED_TABLES,

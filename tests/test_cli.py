@@ -70,8 +70,8 @@ def test_dry_run_all_tasks_multiple_models_and_trials(db_path, capsys):
     assert rc == 0
     assert calls == []
     out = capsys.readouterr().out
-    # 15 tasks x 2 models x 2 trials = 60 planned episodes
-    assert out.count("would run:") == 60
+    # 25 tasks x 2 models x 2 trials = 100 planned episodes
+    assert out.count("would run:") == 100
 
 
 def test_run_requires_task_and_model_or_all(db_path):
@@ -279,8 +279,8 @@ def test_run_is_resumable_and_skips_already_recorded_combos(db_path, capsys):
 
 def test_do_nothing_agent_is_reported_split_not_blended(db_path, offline_env, capsys):
     """Every trap task passes on an empty diff, so an agent that does nothing
-    passes all 4 traps and none of the 11 normal tasks. A blended headline
-    would call that 4/15 (27%) for doing nothing; the report must never show one."""
+    passes all 6 traps and none of the 19 normal tasks. A blended headline
+    would call that 6/25 (24%) for doing nothing; the report must never show one."""
     before, after = offline_env.snapshots()
     nothing = diff(before, after)
     with Results(db_path) as results:
@@ -296,12 +296,39 @@ def test_do_nothing_agent_is_reported_split_not_blended(db_path, offline_env, ca
     assert main(["--results-db", db_path, "report", "--run", str(run_id), "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["grading"]["state_verifier"] == {
-        "normal": {"passed": 0, "total": 11},
-        "trap": {"passed": 4, "total": 4},
+        "normal": {"passed": 0, "total": 19},
+        "trap": {"passed": 6, "total": 6},
     }
 
     assert main(["--results-db", db_path, "report", "--run", str(run_id)]) == 0
     md = capsys.readouterr().out
-    assert "state_verifier: normal 0/11 passed | trap 4/4 passed" in md
-    assert "4/15" not in md
-    assert "/15" not in md  # no figure over all 15 tasks, in any form
+    assert "state_verifier: normal 0/19 passed | trap 6/6 passed" in md
+    assert "6/25" not in md
+    assert "/25" not in md  # no figure over all 25 tasks, in any form
+
+
+# -- per-task turn budget ---------------------------------------------------------
+
+
+def test_run_passes_the_tasks_own_turn_budget_to_the_harness(db_path, monkeypatch):
+    """023 needs ~21 single-call turns; the CLI must hand the harness its
+    max_turns, not the default. run_episode is stubbed, so no DB is needed."""
+    from types import SimpleNamespace
+
+    from consequence import cli
+    from consequence.harness import DEFAULT_MAX_TURNS
+    from consequence.tasks import TASKS_BY_ID
+
+    seen = {}
+
+    def fake_run_episode(task, provider, results, trial_index, *, run_id, max_turns):
+        seen[task.id] = max_turns
+        return SimpleNamespace(turn_count=0, status="completed", latency_ms=0, cost_usd=None)
+
+    monkeypatch.setattr(cli, "run_episode", fake_run_episode)
+    for task_id in ("023_volume", "001_void_duplicate"):
+        assert main(["--results-db", db_path, "run", "--task", task_id, "--model", "mock-1"],
+                    provider_factory=_mock_factory_no_tools) == 0
+
+    assert seen == {"023_volume": 40, "001_void_duplicate": DEFAULT_MAX_TURNS}
+    assert TASKS_BY_ID["023_volume"].max_turns == 40

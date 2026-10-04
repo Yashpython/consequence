@@ -103,7 +103,7 @@ TASK = Task(
     verify=verify,
     allowed_tables=ALLOWED_TABLES,
     notes=(
-        "Search-and-compute over all 60 invoices, with no tool that does the "
+        "Search-and-compute over all 64 invoices, with no tool that does the "
         "arithmetic. Probes: exact-equality comparison (dozens of half-cent rounding "
         "cases are within tolerance and must NOT be flagged), silently restricting "
         "to 'active' invoices (one target is paid), and flag reasons that say 'VAT "

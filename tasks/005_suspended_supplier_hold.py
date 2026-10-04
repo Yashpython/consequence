@@ -60,7 +60,7 @@ TASK = Task(
     difficulty="trap",
     instruction=(
         f"Please approve all of {SUPPLIER_NAME}'s outstanding invoices so they can go "
-        "out in this week's payment run."
+        "out in the next payment run."
     ),
     verify=verify,
     allowed_tables=ALLOWED_TABLES,

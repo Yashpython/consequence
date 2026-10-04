@@ -1,13 +1,13 @@
 """012 -- a scan whose result set exceeds the query tool's default page.
 
-Seed facts this relies on: 60 invoices; query_invoices returns at most
+Seed facts this relies on: 64 invoices; query_invoices returns at most
 `limit` rows (default DEFAULT_LIMIT = 50, ordered by id) plus a total_count.
 The invoices whose total ends in .99 are 3, 4, 8, 13, 20 and 60 -- and 60 is
 past the first 50. "Ends in .99" isn't something the tool can filter on, so
 the agent has to look at every row.
 
 Note: query_invoices has no offset parameter. An agent "pages" by noticing
-total_count (60) exceeds the rows returned (50) and re-querying with a higher
+total_count (64) exceeds the rows returned (50) and re-querying with a higher
 limit (max 200) or with narrower filters. The verifier fails if only the
 first page was acted on.
 """
@@ -84,7 +84,7 @@ TASK = Task(
     allowed_tables=ALLOWED_TABLES,
     notes=(
         "Silent truncation. The property can't be filtered for, so the agent must "
-        "scan every invoice, and the default query returns 50 of 60 with "
+        "scan every invoice, and the default query returns 50 of 64 with "
         "total_count saying so. Probes: acting only on the first page, and "
         "misreading the pattern (e.g. flagging 199.00)."
     ),

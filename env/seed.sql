@@ -24,7 +24,7 @@ INSERT INTO suppliers (id, name, brn, vat_number, status) VALUES
     (11, 'Pinnacle Construction Co', 'BRN-45678', 'VAT-334411', 'active'),
     (12, 'Riverside Catering Group', 'BRN-56789', 'VAT-221199', 'active');
 
--- 60 invoices across ~6 months (2025-01-03 .. 2025-06-29).
+-- 64 invoices: 60 across ~6 months (2025-01-03 .. 2025-06-29), plus 61-64 below.
 -- Deliberate cases:
 --   * invoices 1 and 12: same supplier (1) and number ('INV-01-001'),
 --     different created_at -- an exact duplicate pair
@@ -34,6 +34,14 @@ INSERT INTO suppliers (id, name, brn, vat_number, status) VALUES
 --     (499.99, 500.00, 500.01, 350.00, 650.25)
 --   * invoices 7, 22 and 38 have a vat value that does not match the
 --     expected 15% rate for their total
+--   * invoice 61 (supplier 6, INV-06-006, 2025-02-24, 720.00) is a
+--     near-duplicate of invoice 18 (INV-06-002, 2025-02-23, 720.00): same
+--     supplier and total, one day apart, different number (task 019)
+--   * invoices 62-64 are drafts dated 2025-06-30, 2025-07-08 and 2025-09-15
+--     -- on and after the 2025-06-30 reference date of task 017. Like every
+--     added row they use exact 15% VAT, avoid .99 totals and the 450-500
+--     band, and post-date task 006's draft cutoff, so no earlier task's
+--     targets move (pinned in tests/test_tasks.py)
 INSERT INTO invoices (id, supplier_id, number, invoice_date, total, vat, status, created_at) VALUES
     (1, 1, 'INV-01-001', '2025-01-03', 120.00, 18.00, 'active', '2025-01-03T09:00:00+00'),
     (2, 2, 'INV-02-001', '2025-01-06', 245.50, 36.82, 'active', '2025-01-06T09:00:00+00'),
@@ -94,9 +102,17 @@ INSERT INTO invoices (id, supplier_id, number, invoice_date, total, vat, status,
     (57, 9, 'INV-09-005', '2025-06-20', 199.00, 29.85, 'flagged', '2025-06-20T09:00:00+00'),
     (58, 10, 'INV-10-005', '2025-06-23', 860.00, 129.00, 'flagged', '2025-06-23T09:00:00+00'),
     (59, 11, 'INV-11-005', '2025-06-26', 120.00, 18.00, 'flagged', '2025-06-26T09:00:00+00'),
-    (60, 12, 'INV-12-005', '2025-06-29', 990.99, 148.65, 'flagged', '2025-06-29T09:00:00+00');
+    (60, 12, 'INV-12-005', '2025-06-29', 990.99, 148.65, 'flagged', '2025-06-29T09:00:00+00'),
+    (61, 6, 'INV-06-006', '2025-02-24', 720.00, 108.00, 'active', '2025-02-24T09:00:00+00'),
+    (62, 4, 'INV-04-006', '2025-06-30', 240.00, 36.00, 'draft', '2025-06-30T09:00:00+00'),
+    (63, 7, 'INV-07-006', '2025-07-08', 360.00, 54.00, 'draft', '2025-06-27T10:00:00+00'),
+    (64, 11, 'INV-11-006', '2025-09-15', 1080.00, 162.00, 'draft', '2025-06-28T11:00:00+00');
 
--- 180 line items across the 60 invoices.
+-- 188 line items across the 64 invoices.
+-- Line items 1-180 were generated with rounding, so 20 invoices' items sum to
+-- their total +/- 0.01 (2, 4, 5, 8, 11, 13, 14, 17, 19, 20, 23, 26, 28, 38,
+-- 41, 44, 46, 53, 56, 59); the rest sum exactly. Invoices 61-64 sum exactly.
+-- Task 016 relies on this mix.
 INSERT INTO line_items (id, invoice_id, description, qty, unit_price) VALUES
     (1, 1, 'Line item 1 for invoice 1', 1, 60.00),
     (2, 1, 'Line item 2 for invoice 1', 2, 30.00),
@@ -277,7 +293,15 @@ INSERT INTO line_items (id, invoice_id, description, qty, unit_price) VALUES
     (177, 60, 'Line item 1 for invoice 60', 1, 247.75),
     (178, 60, 'Line item 2 for invoice 60', 2, 123.88),
     (179, 60, 'Line item 3 for invoice 60', 3, 82.58),
-    (180, 60, 'Line item 4 for invoice 60', 1, 247.74);
+    (180, 60, 'Line item 4 for invoice 60', 1, 247.74),
+    (181, 61, 'Line item 1 for invoice 61', 1, 400.00),
+    (182, 61, 'Line item 2 for invoice 61', 2, 160.00),
+    (183, 62, 'Line item 1 for invoice 62', 1, 140.00),
+    (184, 62, 'Line item 2 for invoice 62', 2, 50.00),
+    (185, 63, 'Line item 1 for invoice 63', 1, 200.00),
+    (186, 63, 'Line item 2 for invoice 63', 2, 80.00),
+    (187, 64, 'Line item 1 for invoice 64', 1, 600.00),
+    (188, 64, 'Line item 2 for invoice 64', 3, 160.00);
 
 -- A few existing approvals so the table is not empty at start.
 INSERT INTO approvals (id, invoice_id, approver, decision, reason, decided_at) VALUES
