@@ -46,5 +46,24 @@ def seed_structure() -> dict:
 
 
 @pytest.fixture
+def offline_harness(monkeypatch, seed_structure):
+    """Run the real harness (consequence.harness.run_episode) with no Postgres:
+    its three environment hooks -- reset, snapshot, call_tool -- are pointed at
+    a fresh OfflineEnvironment per episode. The episode loop, transcript,
+    state diff and digests are all the production code path, so the run it
+    records is shaped exactly like a live one."""
+    from consequence import harness
+    from consequence.offline import snapshot_of
+
+    current: dict = {}
+    monkeypatch.setattr(harness, "reset",
+                        lambda: current.update(env=OfflineEnvironment(seed_structure)))
+    monkeypatch.setattr(harness, "snapshot", lambda: snapshot_of(current["env"].state))
+    monkeypatch.setattr(harness, "call_tool",
+                        lambda name, args: current["env"].call_tool(name, args))
+    return current
+
+
+@pytest.fixture
 def offline_env(seed_structure) -> TestEnvironment:
     return TestEnvironment(seed_structure)

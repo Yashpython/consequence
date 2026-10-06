@@ -9,11 +9,10 @@ exception is `run --dry-run`'s cost preview, which is explicitly a planning
 estimate (see DRY_RUN_ESTIMATED_*_TOKENS below) -- it is labeled as such
 and is never persisted.
 
-Grading: no graders are registered by default yet -- consequence.tools,
-consequence.harness, and this CLI are the plumbing; state_verifier and
-llm_judge implementations (with their required reward-hacking-log entries,
-per the standing rules) land in a later commit. `grade` is fully wired and
-testable today via the `graders` parameter to main().
+Grading: `grade --grader state_verifier` runs consequence.graders.state, which
+scores every episode with its task's verifier and the collateral check from
+stored data alone -- no environment database, no model calls. llm_judge isn't
+implemented yet; other graders can be supplied through main(graders=...).
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from consequence.environment import reset, snapshot
+from consequence.graders.state import GradingIntegrityError, grade_run
 from consequence.harness import DEFAULT_MAX_TURNS, Task, run_episode
 from consequence.providers.base import Provider
 from consequence.providers.registry import compute_cost, load_model_registry, make_provider
@@ -40,8 +40,9 @@ DRY_RUN_ESTIMATED_OUTPUT_TOKENS = 1_500
 GraderFn = Callable[[dict[str, Any], dict[str, Any]], tuple[bool, dict[str, Any]]]
 ProviderFactory = Callable[..., Provider]
 
-# Empty on purpose -- see the module docstring.
+# Graders beyond the built-in state grader (e.g. llm_judge, once it exists).
 DEFAULT_GRADERS: dict[str, GraderFn] = {}
+BUILTIN_GRADERS = ("state_verifier",)
 
 ALL_GRADER_NAMES = ("state_verifier", "llm_judge")
 
@@ -251,41 +252,62 @@ def cmd_run(args: argparse.Namespace, provider_factory: ProviderFactory) -> int:
 # -- grade -----------------------------------------------------------------
 
 
+def _grade_state(args: argparse.Namespace, results: Results) -> None:
+    summary = grade_run(args.run_id, results, regrade=args.regrade)
+    for g in summary.graded:
+        line = (f"graded episode={g.episode_id} task={g.task_id} status={g.status} "
+                f"state_verifier={'pass' if g.passed else 'FAIL'} "
+                f"collateral={'clean' if g.collateral_clean else g.collateral_severity}")
+        if g.status != "completed":
+            line += f" ({g.reason})"
+        print(line)
+    if summary.already_graded:
+        print(f"skipped {len(summary.already_graded)} already-graded episode(s); "
+              "pass --regrade to re-grade them")
+    counts = summary.pass_counts()
+    rates = " | ".join(f"{c} {counts[c]['passed']}/{counts[c]['total']} passed"
+                       for c in CATEGORY_ORDER if c in counts)
+    severities = [g.collateral_severity or "clean" for g in summary.graded]
+    print(f"totals: state_verifier {rates or 'none graded'}; collateral "
+          + ", ".join(f"{severities.count(k)} {k}" for k in ("clean", "benign", "destructive")))
+
+
+def _grade_custom(args: argparse.Namespace, results: Results, name: str,
+                  grader_fn: GraderFn) -> None:
+    episodes = (results.episodes_for_run(args.run_id) if args.regrade
+                else results.ungraded_by(name, run_id=args.run_id))
+    for episode in episodes:
+        diff_row = results.state_diff_for_episode(episode["id"])
+        diff_json = (json.loads(diff_row["diff_json"]) if diff_row is not None
+                     else {"added": [], "removed": [], "changed": []})
+        passed, detail = grader_fn(episode, diff_json)
+        results.record_grading(episode["id"], name, passed=passed, detail_json=detail)
+        print(f"graded episode={episode['id']} grader={name} passed={passed}")
+    print(f"totals: graded={len(episodes)}")
+
+
 def cmd_grade(args: argparse.Namespace, graders: Mapping[str, GraderFn]) -> int:
     requested = set(ALL_GRADER_NAMES) if args.grader == "all" else {args.grader}
-    missing = requested - graders.keys()
-    if missing:
-        raise CLIError(
-            f"grader(s) not implemented yet: {sorted(missing)}. "
-            f"registered: {sorted(graders) or 'none'}"
-        )
+    available = set(BUILTIN_GRADERS) | set(graders)
+    missing = requested - available
+    if missing == requested:
+        raise CLIError(f"grader(s) not implemented yet: {sorted(missing)}. "
+                       f"available: {sorted(available)}")
 
     results = Results(args.results_db)
     try:
         if results.get_run(args.run_id) is None:
             raise CLIError(f"no run {args.run_id}")
-
-        graded_count = 0
-        for grader_name in sorted(requested):
-            grader_fn = graders[grader_name]
-            episodes = (
-                results.episodes_for_run(args.run_id)
-                if args.regrade
-                else results.ungraded_by(grader_name, run_id=args.run_id)
-            )
-            for episode in episodes:
-                diff_row = results.state_diff_for_episode(episode["id"])
-                diff_json = (
-                    json.loads(diff_row["diff_json"])
-                    if diff_row is not None
-                    else {"added": [], "removed": [], "changed": []}
-                )
-                passed, detail = grader_fn(episode, diff_json)
-                results.record_grading(episode["id"], grader_name, passed=passed, detail_json=detail)
-                graded_count += 1
-                print(f"graded episode={episode['id']} grader={grader_name} passed={passed}")
-
-        print(f"totals: graded={graded_count}")
+        for name in sorted(requested - missing):
+            if name == "state_verifier":
+                try:
+                    _grade_state(args, results)
+                except GradingIntegrityError as exc:
+                    raise CLIError(f"grading stopped, nothing written: {exc}") from exc
+            else:
+                _grade_custom(args, results, name, graders[name])
+        if missing:
+            print(f"not implemented yet, not run: {', '.join(sorted(missing))}")
         return 0
     finally:
         results.close()

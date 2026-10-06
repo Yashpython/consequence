@@ -69,6 +69,20 @@ verifier is wrong, so fix the verifier, never weaken the adversary.
   did touch something it shouldn't have, and the audit trail shows it. The
   collateral check still reports only net damage, so it remains blind to
   transient writes by design; the verifier is where they're caught.
+- **Grading against the wrong state.** The offline grader
+  (`consequence/graders/state.py`) rebuilds each episode from stored data:
+  `before` is the seed parsed from `env/seed.sql`, and `after` is `before`
+  plus the stored diff. If the seed is edited after a run, `before` silently
+  becomes a different state, and every verifier that computes its targets
+  from `before` would score the episode against the wrong targets, with no
+  error. **Closed:** each episode's recorded `digest_before` must equal the
+  current seed's digest, and the rebuilt `after` must hash to the recorded
+  `digest_after`. Otherwise grading stops before writing a single row
+  (`GradingIntegrityError`); it never partially grades a run. It also stops
+  on an unknown task id or a missing diff. Episodes that errored, timed out
+  or ran out of turns are graded `passed=False` with the reason recorded,
+  never skipped, since skipping them would raise pass rates.
+  `tests/test_grader_state.py` covers each case.
 - **Writing outside the tool layer.** Not possible. The model never sees SQL
   (standing rule 4), so every change goes through `consequence.tools`, which
   enforces its own business rules and writes the audit row. **Closed**

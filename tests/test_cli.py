@@ -119,10 +119,11 @@ def _trivial_verifier(episode, diff_json):
     return passed, {"reason": "state changed" if passed else "no-op"}
 
 
-def test_grade_unimplemented_grader_is_a_clean_error(db_path):
+def test_grade_unimplemented_grader_is_a_clean_error(db_path, capsys):
     run_id, _, _ = _seed_two_episodes(db_path)
-    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "state_verifier"])
+    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"])
     assert rc == 2
+    assert "not implemented yet" in capsys.readouterr().err  # the right reason, not another
 
     with Results(db_path) as results:
         assert results.episodes_needing_grading(run_id=run_id) != []
@@ -132,8 +133,8 @@ def test_grade_records_one_row_per_episode(db_path, capsys):
     run_id, changed_ep, noop_ep = _seed_two_episodes(db_path)
 
     rc = main(
-        ["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "state_verifier"],
-        graders={"state_verifier": _trivial_verifier},
+        ["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"],
+        graders={"llm_judge": _trivial_verifier},
     )
     assert rc == 0
     assert "totals: graded=2" in capsys.readouterr().out
@@ -147,11 +148,11 @@ def test_grade_records_one_row_per_episode(db_path, capsys):
 
 def test_grade_regrade_replaces_rather_than_duplicates(db_path):
     run_id, changed_ep, _ = _seed_two_episodes(db_path)
-    graders = {"state_verifier": _trivial_verifier}
+    graders = {"llm_judge": _trivial_verifier}
 
-    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "state_verifier"],
+    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"],
          graders=graders)
-    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "state_verifier",
+    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge",
           "--regrade"], graders=graders)
 
     with Results(db_path) as results:
@@ -159,8 +160,8 @@ def test_grade_regrade_replaces_rather_than_duplicates(db_path):
 
 
 def test_grade_unknown_run_is_a_clean_error(db_path):
-    rc = main(["--results-db", db_path, "grade", "--run", "999", "--grader", "state_verifier"],
-              graders={"state_verifier": _trivial_verifier})
+    rc = main(["--results-db", db_path, "grade", "--run", "999", "--grader", "llm_judge"],
+              graders={"llm_judge": _trivial_verifier})
     assert rc == 2
 
 
@@ -169,8 +170,8 @@ def test_grade_unknown_run_is_a_clean_error(db_path):
 
 def test_report_json_reflects_persisted_rows(db_path, capsys):
     run_id, _changed_ep, _noop_ep = _seed_two_episodes(db_path)
-    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "state_verifier"],
-         graders={"state_verifier": _trivial_verifier})
+    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"],
+         graders={"llm_judge": _trivial_verifier})
     capsys.readouterr()  # discard grade output
 
     rc = main(["--results-db", db_path, "report", "--run", str(run_id), "--format", "json"])
@@ -179,7 +180,7 @@ def test_report_json_reflects_persisted_rows(db_path, capsys):
     assert report["episode_count"] == 2
     assert report["by_status"] == {"completed": 2}
     # t1/t2 aren't catalog tasks, so they report under "unknown"
-    assert report["grading"]["state_verifier"] == {"unknown": {"passed": 1, "total": 2}}
+    assert report["grading"]["llm_judge"] == {"unknown": {"passed": 1, "total": 2}}
 
 
 def test_report_unknown_run_is_a_clean_error(db_path):

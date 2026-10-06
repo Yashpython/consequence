@@ -16,9 +16,10 @@ Every successful write appends one audit_log row (actor 'agent'), as impl does.
 Read tools are not simulated: they never change state, so they can't change a
 verdict.
 
-Cells have the shape a snapshot takes after a JSON round trip: NUMERIC as
-normalized strings (like environment._normalize), dates and timestamps as ISO
-strings. Verifiers accept that shape (see consequence/task.py).
+Cells have exactly the canonical form environment.snapshot() produces (see
+environment._normalize): NUMERIC as normalized strings, dates as ISO strings,
+timestamps as UTC ISO strings. So snapshot_of(parse_seed()) has the same
+digest as a live snapshot taken right after reset().
 """
 
 from __future__ import annotations
@@ -27,12 +28,13 @@ import copy
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from consequence.diff import diff
-from consequence.environment import SEED_PATH, TABLES, Snapshot
+from consequence.environment import SCHEMA_PATH, SEED_PATH, TABLES, Snapshot
 from consequence.tools.impl import AGENT_ACTOR, ToolError, _validate_args, _validate_vat_number
 from consequence.tools.schema import TOOLS_BY_NAME
 
@@ -52,8 +54,22 @@ def _parse_value(match: re.Match) -> object:
     return int(integer)
 
 
+_CREATE = re.compile(r"CREATE TABLE (\w+) \((.*?)\n\);", re.DOTALL)
+
+
+def _timestamptz_columns(path: Path = SCHEMA_PATH) -> dict[str, set[str]]:
+    """{table: its timestamptz columns}, read from env/schema.sql."""
+    return {
+        table: set(re.findall(r"^\s*(\w+)\s+timestamptz", body, re.MULTILINE))
+        for table, body in _CREATE.findall(path.read_text(encoding="utf-8"))
+    }
+
+
 def parse_seed(path: Path = SEED_PATH) -> dict[str, list[dict[str, Any]]]:
-    """env/seed.sql parsed into {table: rows sorted by id}."""
+    """env/seed.sql parsed into {table: rows sorted by id}, in exactly the
+    canonical form environment.snapshot() produces -- timestamps as UTC ISO
+    strings -- so its digest equals a live snapshot's after reset()."""
+    timestamptz = _timestamptz_columns()
     sql = "\n".join(
         line for line in path.read_text(encoding="utf-8").splitlines()
         if not line.lstrip().startswith("--")
@@ -67,7 +83,11 @@ def parse_seed(path: Path = SEED_PATH) -> dict[str, list[dict[str, Any]]]:
                 values = [_parse_value(m) for m in _TOKEN.finditer(row.group(1))]
                 if len(values) != len(columns):
                     raise ValueError(f"cannot parse seed row: {line}")
-                structure[table].append(dict(zip(columns, values, strict=True)))
+                record = dict(zip(columns, values, strict=True))
+                for col in timestamptz.get(table, ()):
+                    if record[col] is not None:
+                        record[col] = datetime.fromisoformat(record[col]).astimezone(UTC).isoformat()
+                structure[table].append(record)
     for rows in structure.values():
         rows.sort(key=lambda r: r["id"])
     return structure

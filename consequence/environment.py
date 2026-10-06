@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,7 @@ def reset() -> None:
 
 
 def _normalize(value: Any) -> Any:
-    """Canonicalize a single cell value for hashing.
+    """Canonicalize a single cell value, so a snapshot is plain JSON.
 
     NUMERIC values come back as Decimal. Decimal preserves trailing zeros
     ("205.50" != "205.5" as Decimal reprs), so two databases that are equal in
@@ -54,9 +55,20 @@ def _normalize(value: Any) -> Any:
     strips that: `format(value.normalize(), "f")` always yields the same
     plain-decimal string for equal values, without falling back to
     scientific notation the way plain str(normalize()) can for round values.
+
+    Dates become ISO strings and timestamps become UTC ISO strings
+    ("2025-01-03T09:00:00+00:00"), independent of the session time zone.
+    That makes every snapshot cell JSON-native, which is what lets offline
+    grading work: an episode's stored state diff round-trips losslessly, and
+    the seed parsed from env/seed.sql (consequence.offline) hashes to exactly
+    the digest a live snapshot of a fresh reset() records.
     """
     if isinstance(value, Decimal):
         return format(value.normalize(), "f")
+    if isinstance(value, datetime):  # before date: datetime is a date subclass
+        return value.astimezone(UTC).isoformat() if value.tzinfo else value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     return value
 
 
