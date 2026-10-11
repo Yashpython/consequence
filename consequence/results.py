@@ -4,11 +4,22 @@ This is designed so grading can be re-run offline, from stored raw data,
 without ever calling a model API again. A bug in a grader costs nothing to
 fix and re-score -- see state_diffs and record_grading below.
 
+It is the single source of truth: a results.db is gradeable on its own, with
+no other file present. Each run stores the environment's starting state once
+(runs.initial_snapshot_json -- reset() is deterministic, so every episode in a
+run starts from exactly this state), plus the seed SQL it came from. Each
+episode stores the full state it left (state_diffs.after_snapshot_json). Both
+are stored as the exact canonical JSON that was hashed, so verifying one is
+sha256(stored text) == recorded digest. Integrity is checked when an episode
+is written, not discovered later at grading: a digest or diff that doesn't
+match raises ResultsIntegrityError and nothing is written.
+
 Uses SQLite at RESULTS_DB_PATH (default results/results.db).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
@@ -17,19 +28,42 @@ from pathlib import Path
 from typing import Any, Self
 
 from consequence.config import load_config
+from consequence.diff import diff
+from consequence.environment import Snapshot, canonical_json, digest_of, snapshot_from_json
 
 DEFAULT_DB_PATH = "results/results.db"
+
+# Bump on any schema change. A results.db with a different version is refused
+# outright. There are no migrations: no real runs exist yet, so the remedy is
+# to delete the file and re-run.
+SCHEMA_VERSION = 2
+
+
+class ResultsSchemaError(RuntimeError):
+    """The results.db was written by a different schema version."""
+
+
+class ResultsIntegrityError(RuntimeError):
+    """Stored state doesn't match its recorded digests, or its own diff."""
 
 # SQLite table order matters here only for readability; foreign keys are
 # declared but SQLite enforces them only with PRAGMA foreign_keys = ON,
 # which Results turns on for every connection.
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
-    id          INTEGER PRIMARY KEY,
-    started_at  TEXT NOT NULL,
-    finished_at TEXT,
-    git_sha     TEXT,
-    notes       TEXT
+    id                    INTEGER PRIMARY KEY,
+    schema_version        INTEGER NOT NULL,
+    started_at            TEXT NOT NULL,
+    finished_at           TEXT,
+    git_sha               TEXT,
+    notes                 TEXT,
+    -- Provenance: the exact seed this run's environment was built from.
+    seed_sql_text         TEXT NOT NULL,
+    seed_sha256           TEXT NOT NULL,
+    -- The canonical starting state, stored once per run: reset() is
+    -- deterministic, so it is identical for every episode (enforced on write).
+    initial_snapshot_json TEXT NOT NULL,
+    initial_digest        TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS episodes (
@@ -63,17 +97,20 @@ CREATE TABLE IF NOT EXISTS transcripts (
     raw_response  TEXT
 );
 
--- The raw before/after state for an episode, stored verbatim so a grader
--- can be re-run offline against exactly what happened -- no need to replay
--- the episode or call a model API again. This is the whole point: a buggy
--- verifier costs nothing to fix and re-score, because the evidence it grades
--- already lives here.
+-- The state an episode left, stored verbatim so a grader can be re-run
+-- offline against exactly what happened -- no need to replay the episode or
+-- call a model API again. This is the whole point: a buggy verifier costs
+-- nothing to fix and re-score, because the evidence it grades already lives
+-- here. `before` is the run's initial_snapshot_json (digest_before must equal
+-- the run's initial_digest). diff_json is kept for the trace viewer, and is
+-- cross-checked on write against diff(before, after).
 CREATE TABLE IF NOT EXISTS state_diffs (
-    id             INTEGER PRIMARY KEY,
-    episode_id     INTEGER NOT NULL REFERENCES episodes (id),
-    diff_json      TEXT NOT NULL,
-    digest_before  TEXT NOT NULL,
-    digest_after   TEXT NOT NULL
+    id                  INTEGER PRIMARY KEY,
+    episode_id          INTEGER NOT NULL REFERENCES episodes (id),
+    diff_json           TEXT NOT NULL,
+    digest_before       TEXT NOT NULL,
+    digest_after        TEXT NOT NULL,
+    after_snapshot_json TEXT NOT NULL
 );
 
 -- Multiple gradings per episode is by design -- that is the entire
@@ -117,7 +154,7 @@ class Results:
     Use as a context manager or call close() explicitly:
 
         with Results() as results:
-            run_id = results.start_run()
+            run_id = consequence.harness.begin_run(results)
             ...
     """
 
@@ -130,8 +167,23 @@ class Results:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.executescript(SCHEMA_SQL)
-        self._conn.commit()
+        self._initial_cache: dict[int, Snapshot] = {}
+        has_tables = self._conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
+        ).fetchone()[0]
+        if not has_tables:  # a brand-new file: create it at the current version
+            self._conn.executescript(SCHEMA_SQL)
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self._conn.commit()
+            return
+        found = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if found != SCHEMA_VERSION:
+            self._conn.close()
+            raise ResultsSchemaError(
+                f"{self.db_path} has results schema version {found}, but this code "
+                f"needs version {SCHEMA_VERSION}. There are no migrations: delete "
+                f"{self.db_path} and re-run."
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -149,17 +201,51 @@ class Results:
 
     def start_run(
         self,
+        initial_snapshot: Snapshot,
+        seed_sql_text: str,
+        *,
         started_at: str | None = None,
         git_sha: str | None = None,
         notes: str | None = None,
     ) -> int:
+        """Begin a run, storing its starting state and seed once.
+
+        Normally called via consequence.harness.begin_run, which takes the
+        snapshot right after reset().
+        """
+        initial_json = canonical_json(initial_snapshot.structure)
+        if digest_of(initial_json) != initial_snapshot.digest:
+            raise ResultsIntegrityError("initial snapshot doesn't hash to its own digest")
+        seed_sha256 = hashlib.sha256(seed_sql_text.encode("utf-8")).hexdigest()
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO runs (started_at, git_sha, notes) VALUES (?, ?, ?)",
-                (started_at or _now(), git_sha, notes),
+                """
+                INSERT INTO runs (schema_version, started_at, git_sha, notes, seed_sql_text,
+                                  seed_sha256, initial_snapshot_json, initial_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (SCHEMA_VERSION, started_at or _now(), git_sha, notes, seed_sql_text,
+                 seed_sha256, initial_json, initial_snapshot.digest),
             )
         assert cur.lastrowid is not None
         return cur.lastrowid
+
+    def initial_snapshot(self, run_id: int) -> Snapshot:
+        """The run's stored starting state, digest-verified."""
+        if run_id not in self._initial_cache:
+            row = self._conn.execute(
+                "SELECT initial_snapshot_json, initial_digest FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ResultsIntegrityError(f"no run {run_id}")
+            snap = snapshot_from_json(row["initial_snapshot_json"])
+            if snap.digest != row["initial_digest"]:
+                raise ResultsIntegrityError(
+                    f"run {run_id}: stored initial snapshot hashes to {snap.digest}, "
+                    f"not its recorded initial_digest {row['initial_digest']}"
+                )
+            self._initial_cache[run_id] = snap
+        return self._initial_cache[run_id]
 
     def finish_run(self, run_id: int, finished_at: str | None = None) -> None:
         with self._conn:
@@ -246,20 +332,66 @@ class Results:
                 rows,
             )
 
+    def verify_state(
+        self,
+        run_id: int,
+        diff_json: str,
+        digest_before: str,
+        digest_after: str,
+        after_snapshot: Snapshot,
+    ) -> str:
+        """Check an episode's state against its run, before anything is
+        written. Returns the after snapshot's canonical JSON to store.
+
+        Raises ResultsIntegrityError if the episode didn't start from the
+        run's initial state, if the after snapshot doesn't hash to
+        digest_after, or if diff_json isn't exactly diff(before, after).
+        """
+        initial = self.initial_snapshot(run_id)
+        if digest_before != initial.digest:
+            raise ResultsIntegrityError(
+                f"episode started from digest {digest_before}, not run {run_id}'s initial "
+                f"state {initial.digest} -- reset() was not deterministic (standing rule 2)"
+            )
+        after_json = canonical_json(after_snapshot.structure)
+        if not digest_of(after_json) == after_snapshot.digest == digest_after:
+            raise ResultsIntegrityError(
+                f"after snapshot hashes to {digest_of(after_json)}, but the recorded "
+                f"digest_after is {digest_after}"
+            )
+        expected = diff(initial, snapshot_from_json(after_json)).to_json()
+        if diff_json != expected:
+            raise ResultsIntegrityError(
+                "diff_json is not diff(before, after) of the stored snapshots"
+            )
+        return after_json
+
     def record_state_diff(
         self,
         episode_id: int,
-        diff_json: Any,
+        diff_json: str,
         digest_before: str,
         digest_after: str,
+        after_snapshot: Snapshot,
     ) -> int:
+        """Store an episode's final state. Verified first (verify_state); a
+        mismatch raises and writes nothing."""
+        row = self._conn.execute(
+            "SELECT run_id FROM episodes WHERE id = ?", (episode_id,)
+        ).fetchone()
+        if row is None:
+            raise ResultsIntegrityError(f"no episode {episode_id}")
+        after_json = self.verify_state(
+            row["run_id"], diff_json, digest_before, digest_after, after_snapshot
+        )
         with self._conn:
             cur = self._conn.execute(
                 """
-                INSERT INTO state_diffs (episode_id, diff_json, digest_before, digest_after)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO state_diffs (episode_id, diff_json, digest_before, digest_after,
+                                         after_snapshot_json)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (episode_id, _json(diff_json), digest_before, digest_after),
+                (episode_id, diff_json, digest_before, digest_after, after_json),
             )
         assert cur.lastrowid is not None
         return cur.lastrowid
@@ -299,7 +431,11 @@ class Results:
     # -- reads ---------------------------------------------------------
 
     def list_runs(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
+        """Run metadata only -- not the stored seed or snapshot payloads."""
+        rows = self._conn.execute(
+            "SELECT id, schema_version, started_at, finished_at, git_sha, notes, seed_sha256, "
+            "initial_digest FROM runs ORDER BY id"
+        ).fetchall()
         return [_row(r) for r in rows]
 
     def get_run(self, run_id: int) -> dict[str, Any] | None:

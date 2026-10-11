@@ -8,6 +8,7 @@ up as a diff.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -67,6 +68,14 @@ class StateDiff:
         if not include_audit:
             keys = {(table, pk) for table, pk in keys if table != AUDIT_TABLE}
         return keys
+
+    def to_json(self) -> str:
+        """The persisted form (state_diffs.diff_json). It covers EVERY table,
+        audit_log included -- only touched() leaves audit_log out, and that
+        exclusion must never leak into what's stored. Strict JSON: snapshot
+        cells are JSON-native, so a non-native value here is a bug."""
+        payload = {"added": self.added, "removed": self.removed, "changed": self.changed}
+        return json.dumps(payload, sort_keys=True)
 
     def is_empty(self) -> bool:
         return not self.added and not self.removed and not self.changed

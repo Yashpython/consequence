@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from helpers import record_episode_with_state, seed_run
 
 from consequence.cli import main
 from consequence.diff import diff
@@ -90,26 +91,15 @@ def test_run_unknown_task_is_a_clean_error(db_path):
 
 def _seed_two_episodes(db_path: str) -> tuple[int, int, int]:
     with Results(db_path) as results:
-        run_id = results.start_run(notes="seeded for grading test")
-        changed_ep = results.record_episode(
-            run_id=run_id, task_id="t1", model_id="mock-1", trial_index=0,
-            status="completed", input_tokens=10, output_tokens=5,
-            cost_usd=0.01, latency_ms=50, turn_count=2, retry_count=0,
+        run_id = seed_run(results, notes="seeded for grading test")
+        changed_ep = record_episode_with_state(
+            results, run_id, [("void_invoice", {"invoice_id": 2, "reason": "test"})],
+            task_id="t1", input_tokens=10, output_tokens=5, cost_usd=0.01, latency_ms=50,
+            turn_count=2, retry_count=0,
         )
-        results.record_state_diff(
-            changed_ep,
-            diff_json={"added": [], "removed": [],
-                       "changed": [["invoices", 2, {"status": ["active", "void"]}]]},
-            digest_before="a", digest_after="b",
-        )
-        noop_ep = results.record_episode(
-            run_id=run_id, task_id="t2", model_id="mock-1", trial_index=0,
-            status="completed", input_tokens=1, output_tokens=1,
+        noop_ep = record_episode_with_state(
+            results, run_id, [], task_id="t2", input_tokens=1, output_tokens=1,
             cost_usd=0.001, latency_ms=10, turn_count=1, retry_count=0,
-        )
-        results.record_state_diff(
-            noop_ep, diff_json={"added": [], "removed": [], "changed": []},
-            digest_before="a", digest_after="a",
         )
     return run_id, changed_ep, noop_ep
 
@@ -285,7 +275,7 @@ def test_do_nothing_agent_is_reported_split_not_blended(db_path, offline_env, ca
     before, after = offline_env.snapshots()
     nothing = diff(before, after)
     with Results(db_path) as results:
-        run_id = results.start_run(notes="do-nothing agent")
+        run_id = seed_run(results, notes="do-nothing agent")
         for task in TASKS:
             episode_id = results.record_episode(
                 run_id=run_id, task_id=task.id, model_id="do-nothing", trial_index=0,

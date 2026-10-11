@@ -25,7 +25,7 @@ from typing import Any
 
 from consequence.environment import reset, snapshot
 from consequence.graders.state import GradingIntegrityError, grade_run
-from consequence.harness import DEFAULT_MAX_TURNS, Task, run_episode
+from consequence.harness import DEFAULT_MAX_TURNS, Task, begin_run, run_episode
 from consequence.providers.base import Provider
 from consequence.providers.registry import compute_cost, load_model_registry, make_provider
 from consequence.results import Results
@@ -201,7 +201,8 @@ def cmd_run(args: argparse.Namespace, provider_factory: ProviderFactory) -> int:
 
     results = Results(args.results_db)
     try:
-        run_id = args.run_id if args.run_id is not None else results.start_run(notes=args.run_notes)
+        run_id = (args.run_id if args.run_id is not None
+                  else begin_run(results, notes=args.run_notes))
         print(f"run_id={run_id}")
 
         already_done = {

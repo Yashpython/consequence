@@ -25,8 +25,6 @@ digest as a live snapshot taken right after reset().
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -34,7 +32,14 @@ from pathlib import Path
 from typing import Any
 
 from consequence.diff import diff
-from consequence.environment import SCHEMA_PATH, SEED_PATH, TABLES, Snapshot
+from consequence.environment import (
+    SCHEMA_PATH,
+    SEED_PATH,
+    TABLES,
+    Snapshot,
+    canonical_json,
+    digest_of,
+)
 from consequence.tools.impl import AGENT_ACTOR, ToolError, _validate_args, _validate_vat_number
 from consequence.tools.schema import TOOLS_BY_NAME
 
@@ -94,11 +99,8 @@ def parse_seed(path: Path = SEED_PATH) -> dict[str, list[dict[str, Any]]]:
 
 
 def snapshot_of(structure: dict[str, list[dict[str, Any]]]) -> Snapshot:
-    canonical = json.dumps(structure, sort_keys=True, default=str)
-    return Snapshot(
-        structure=copy.deepcopy(structure),
-        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-    )
+    return Snapshot(structure=copy.deepcopy(structure),
+                    digest=digest_of(canonical_json(structure)))
 
 
 class OfflineEnvironment:

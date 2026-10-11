@@ -78,6 +78,28 @@ class Snapshot:
     digest: str
 
 
+def canonical_json(structure: dict[str, list[dict[str, Any]]]) -> str:
+    """THE serialization of a snapshot: what gets hashed AND what gets stored.
+
+    Because the stored text is exactly the hashed text, verifying a stored
+    snapshot is just sha256(stored) == recorded digest -- no re-serialization
+    that could drift. Strict on purpose (no default=str): every cell is
+    JSON-native after _normalize, so anything else is a bug and should fail
+    loudly here rather than be silently stringified.
+    """
+    return json.dumps(structure, sort_keys=True)
+
+
+def digest_of(canonical: str) -> str:
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def snapshot_from_json(canonical: str) -> Snapshot:
+    """Load a stored snapshot. Its digest is computed from the stored text
+    itself; callers compare it to the digest that was recorded."""
+    return Snapshot(structure=json.loads(canonical), digest=digest_of(canonical))
+
+
 def snapshot() -> Snapshot:
     """Return every table's rows, ordered by primary key, plus a sha256 digest.
 
@@ -95,6 +117,4 @@ def snapshot() -> Snapshot:
                     rows.append({col: _normalize(val) for col, val in zip(columns, record)})
                 structure[table] = rows
 
-    canonical = json.dumps(structure, sort_keys=True, default=str)
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return Snapshot(structure=structure, digest=digest)
+    return Snapshot(structure=structure, digest=digest_of(canonical_json(structure)))

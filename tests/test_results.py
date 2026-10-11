@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 
 import pytest
+from helpers import record_episode_with_state, seed_run
 
-from consequence.results import Results
+from consequence.diff import diff
+from consequence.environment import SEED_PATH, TABLES, Snapshot, snapshot_from_json
+from consequence.results import (
+    SCHEMA_VERSION,
+    Results,
+    ResultsIntegrityError,
+    ResultsSchemaError,
+)
 
 
 @pytest.fixture
@@ -35,7 +44,7 @@ def _make_episode(results: Results, run_id: int, **overrides) -> int:
 
 
 def test_round_trip_runs(results):
-    run_id = results.start_run(git_sha="abc123", notes="smoke run")
+    run_id = seed_run(results, git_sha="abc123", notes="smoke run")
     results.finish_run(run_id, finished_at="2026-01-01T01:00:00+00:00")
 
     row = results._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
@@ -45,7 +54,7 @@ def test_round_trip_runs(results):
 
 
 def test_round_trip_episodes(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     episode_id = _make_episode(results, run_id)
 
     [row] = results.episodes_for_run(run_id)
@@ -58,7 +67,7 @@ def test_round_trip_episodes(results):
 
 
 def test_round_trip_transcripts(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     episode_id = _make_episode(results, run_id)
 
     turns = [
@@ -85,25 +94,24 @@ def test_round_trip_transcripts(results):
 
 
 def test_round_trip_state_diffs(results):
-    run_id = results.start_run()
-    episode_id = _make_episode(results, run_id)
-
-    diff = {"changed": [["invoices", 12, {"status": ["active", "flagged"]}]]}
-    diff_id = results.record_state_diff(
-        episode_id, diff, digest_before="deadbeef", digest_after="cafef00d"
+    run_id = seed_run(results)
+    episode_id = record_episode_with_state(
+        results, run_id, [("void_invoice", {"invoice_id": 12, "reason": "duplicate"})]
     )
+    row = results.state_diff_for_episode(episode_id)
+    initial = results.initial_snapshot(run_id)
+    after = snapshot_from_json(row["after_snapshot_json"])
 
-    row = results._conn.execute(
-        "SELECT * FROM state_diffs WHERE id = ?", (diff_id,)
-    ).fetchone()
-    assert row["episode_id"] == episode_id
-    assert json.loads(row["diff_json"]) == diff
-    assert row["digest_before"] == "deadbeef"
-    assert row["digest_after"] == "cafef00d"
+    assert row["digest_before"] == initial.digest
+    assert row["digest_after"] == after.digest  # the stored text IS what was hashed
+    assert row["diff_json"] == diff(initial, after).to_json()
+    assert json.loads(row["diff_json"])["changed"] == [
+        ["invoices", 12, {"status": ["active", "void"]}]
+    ]
 
 
 def test_round_trip_gradings(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     episode_id = _make_episode(results, run_id)
 
     results.record_grading(
@@ -119,7 +127,7 @@ def test_round_trip_gradings(results):
 
 
 def test_regrading_is_idempotent_and_replaces(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     episode_id = _make_episode(results, run_id)
 
     first_id = results.record_grading(episode_id, "state_verifier", passed=False)
@@ -149,7 +157,7 @@ def test_regrading_is_idempotent_and_replaces(results):
 
 
 def test_failed_episode_write_rolls_back_cleanly(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     with pytest.raises(sqlite3.IntegrityError):
         # 'bogus' violates the CHECK constraint on status.
         _make_episode(results, run_id, status="bogus")
@@ -159,7 +167,7 @@ def test_failed_episode_write_rolls_back_cleanly(results):
 
 
 def test_failed_transcript_batch_rolls_back_cleanly(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     episode_id = _make_episode(results, run_id)
 
     turns = [
@@ -176,7 +184,7 @@ def test_failed_transcript_batch_rolls_back_cleanly(results):
 
 
 def test_episodes_needing_grading_and_ungraded_by(results):
-    run_id = results.start_run()
+    run_id = seed_run(results)
     graded_by_both = _make_episode(results, run_id, trial_index=0)
     graded_by_one = _make_episode(results, run_id, trial_index=1)
     graded_by_none = _make_episode(results, run_id, trial_index=2)
@@ -193,3 +201,115 @@ def test_episodes_needing_grading_and_ungraded_by(results):
 
     ungraded_verifier = {row["id"] for row in results.ungraded_by("state_verifier", run_id)}
     assert ungraded_verifier == {graded_by_none}
+
+
+# -- results.db is the single source of truth: snapshots, schema, write-time integrity --
+
+
+def test_run_stores_its_initial_state_and_seed_once(results):
+    run_id = seed_run(results)
+    row = results.get_run(run_id)
+    assert row["schema_version"] == SCHEMA_VERSION
+    assert row["seed_sql_text"] == SEED_PATH.read_text(encoding="utf-8")
+    assert row["seed_sha256"] == hashlib.sha256(row["seed_sql_text"].encode()).hexdigest()
+    assert snapshot_from_json(row["initial_snapshot_json"]).digest == row["initial_digest"]
+
+
+def test_schema_version_mismatch_refuses_to_open(tmp_path):
+    path = tmp_path / "results.db"
+    Results(path).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    with pytest.raises(ResultsSchemaError, match="delete .*results.db and re-run"):
+        Results(path)
+
+
+def test_database_from_before_versioning_refuses_to_open(tmp_path):
+    """A results.db written by the previous code: tables present, no version."""
+    path = tmp_path / "results.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL)")
+    with pytest.raises(ResultsSchemaError, match="schema version 0"):
+        Results(path)
+
+
+def _void_12_state():
+    from consequence.offline import OfflineEnvironment
+
+    env = OfflineEnvironment()
+    assert env.call_tool("void_invoice", {"invoice_id": 12, "reason": "dup"})["ok"]
+    before, after = env.snapshots()
+    return before, after, diff(before, after)
+
+
+def _state_rows(results):
+    return results._conn.execute("SELECT COUNT(*) FROM state_diffs").fetchone()[0]
+
+
+def test_write_rejects_an_episode_that_did_not_start_from_the_run_state(results):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    _, after, state_diff = _void_12_state()
+    with pytest.raises(ResultsIntegrityError, match="not deterministic"):
+        results.record_state_diff(episode_id, state_diff.to_json(), "0" * 64, after.digest,
+                                  after)
+    assert _state_rows(results) == 0
+
+
+def test_write_rejects_an_after_snapshot_that_does_not_match_its_digest(results):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    before, after, state_diff = _void_12_state()
+    tampered = Snapshot(structure=after.structure, digest="f" * 64)
+    with pytest.raises(ResultsIntegrityError, match="digest_after"):
+        results.record_state_diff(episode_id, state_diff.to_json(), before.digest,
+                                  tampered.digest, tampered)
+    assert _state_rows(results) == 0
+
+
+def test_write_rejects_a_diff_that_drops_audit_log_rows(results):
+    """The specific way the persisted diff could go wrong: touched() excludes
+    audit_log, and if that exclusion leaked into what's stored, the stored diff
+    would silently lose the audit trail. It must be rejected at write time."""
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    before, after, state_diff = _void_12_state()
+    without_audit = json.loads(state_diff.to_json())
+    without_audit["added"] = [a for a in without_audit["added"] if a[0] != "audit_log"]
+    with pytest.raises(ResultsIntegrityError, match="not diff"):
+        results.record_state_diff(episode_id, json.dumps(without_audit, sort_keys=True),
+                                  before.digest, after.digest, after)
+    assert _state_rows(results) == 0
+
+
+def test_stored_diff_round_trips_every_table_including_audit_log(results):
+    """Regression guard. Which tables changed is computed here independently of
+    the diff module, by comparing the stored before/after rows directly, and
+    the persisted diff_json must cover exactly those tables -- audit_log
+    included. diff.touched() excludes audit_log; that must never leak into
+    what's persisted."""
+    actions = [
+        ("update_supplier", {"supplier_id": 8, "status": "suspended"}),   # suppliers
+        ("void_invoice", {"invoice_id": 44, "reason": "draft"}),          # invoices
+        ("flag_for_review", {"invoice_id": 8, "reason": "active"}),       # review_flags
+        ("create_approval", {"invoice_id": 20, "decision": "rejected", "reason": "x"}),
+    ]
+    run_id = seed_run(results)
+    episode_id = record_episode_with_state(results, run_id, actions)
+    stored = results.state_diff_for_episode(episode_id)
+    before = results.initial_snapshot(run_id).structure
+    after = json.loads(stored["after_snapshot_json"])
+
+    changed_tables = {
+        table for table in TABLES
+        if {r["id"]: r for r in before[table]} != {r["id"]: r for r in after[table]}
+    }
+    payload = json.loads(stored["diff_json"])
+    tables_in_diff = {entry[0] for kind in ("added", "removed", "changed")
+                      for entry in payload[kind]}
+
+    assert changed_tables == {"suppliers", "invoices", "review_flags", "approvals", "audit_log"}
+    assert tables_in_diff == changed_tables
+    audit_added = [row for table, _, row in payload["added"] if table == "audit_log"]
+    assert len(audit_added) == len(actions)
+    assert audit_added == after["audit_log"]  # every audit row, verbatim

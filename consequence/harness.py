@@ -16,14 +16,13 @@ regenerated.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from consequence.diff import StateDiff, diff
-from consequence.environment import reset, snapshot
+from consequence.environment import SEED_PATH, reset, snapshot
 from consequence.providers.base import Provider
 from consequence.providers.registry import compute_cost
 from consequence.results import Results
@@ -73,17 +72,17 @@ class EpisodeRecord:
     diff: StateDiff
 
 
-def _diff_json(state_diff: StateDiff) -> str:
-    """Serialize a StateDiff for storage.
+def begin_run(results: Results, *, notes: str | None = None, git_sha: str | None = None) -> int:
+    """Start a run: reset the environment and store its starting state (and
+    the seed it came from) once, in the run row.
 
-    Snapshot rows can carry raw date/datetime values (they come straight off
-    the DB driver, only NUMERIC is pre-normalized), so this uses the same
-    str-fallback the environment module uses for hashing rather than a plain
-    json.dumps.
+    reset() is deterministic, so every episode of the run starts from exactly
+    this state -- and the results store enforces that on every episode write.
     """
-    payload = {"added": state_diff.added, "removed": state_diff.removed,
-               "changed": state_diff.changed}
-    return json.dumps(payload, default=str, sort_keys=True)
+    reset()
+    return results.start_run(
+        snapshot(), SEED_PATH.read_text(encoding="utf-8"), notes=notes, git_sha=git_sha
+    )
 
 
 def run_episode(
@@ -103,11 +102,16 @@ def run_episode(
     If run_id is omitted, a new run is started for this one episode --
     convenient for tests and one-off calls. A caller running a whole
     experiment (many tasks/models/trials as one invocation) should call
-    results.start_run() once and pass that run_id to every episode, per the
+    begin_run() once and pass that run_id to every episode, per the
     "runs = one row per experiment invocation" design in results.py.
+
+    The one thing that does raise is ResultsIntegrityError, if the episode's
+    state doesn't match its run (e.g. reset() wasn't deterministic). It is
+    checked before any row is written, so a failing episode leaves nothing
+    behind.
     """
     if run_id is None:
-        run_id = results.start_run()
+        run_id = begin_run(results)
 
     reset()
     before = snapshot()
@@ -194,7 +198,11 @@ def run_episode(
     # None (rather than a guess) when provider.model_id isn't in models.yaml --
     # cost_usd is computed from pinned prices, never estimated.
     cost_usd = compute_cost(provider.model_id, input_tokens, output_tokens)
+    diff_json = state_diff.to_json()  # every table, audit_log included
 
+    # Verify before writing anything, so an integrity failure can't leave an
+    # episode row behind without its state.
+    results.verify_state(run_id, diff_json, before.digest, after.digest, after)
     episode_id = results.record_episode(
         run_id=run_id,
         task_id=task.task_id,
@@ -214,9 +222,10 @@ def run_episode(
     results.record_transcript(episode_id, transcript)
     results.record_state_diff(
         episode_id,
-        diff_json=_diff_json(state_diff),
+        diff_json=diff_json,
         digest_before=before.digest,
         digest_after=after.digest,
+        after_snapshot=after,
     )
 
     return EpisodeRecord(

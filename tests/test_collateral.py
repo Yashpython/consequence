@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
+from helpers import seed_run
 
 from consequence.collateral import (
     BENIGN,
@@ -220,7 +221,7 @@ def test_record_collateral_is_queryable_and_idempotent(offline_env, tmp_path):
     _, collateral = offline_env.grade(VOID_DUPLICATE)
 
     with Results(tmp_path / "results.db") as results:
-        run_id = results.start_run()
+        run_id = seed_run(results)
         episode_id = results.record_episode(
             run_id=run_id, task_id=VOID_DUPLICATE.id, model_id="mock",
             trial_index=0, status="completed",

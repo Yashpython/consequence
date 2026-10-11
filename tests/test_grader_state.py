@@ -8,7 +8,9 @@ environment unreachable.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 
 import psycopg
 import pytest
@@ -17,14 +19,13 @@ import consequence.db
 from consequence.adversaries import REFERENCE, approve, flag, void
 from consequence.cli import main
 from consequence.collateral import COLLATERAL_GRADER
+from consequence.environment import SEED_PATH, snapshot_from_json
 from consequence.graders.state import (
     STATE_GRADER,
     GradingIntegrityError,
-    apply_stored_diff,
     grade_run,
-    seed_snapshot,
 )
-from consequence.harness import run_episode
+from consequence.harness import begin_run, run_episode
 from consequence.providers.base import ToolCall, TurnResult
 from consequence.providers.mock import MockProvider
 from consequence.results import Results
@@ -65,7 +66,7 @@ def run(offline_harness, tmp_path):
     """A recorded run of EPISODES, made by the real harness with mock agents."""
     db = tmp_path / "results.db"
     with Results(db) as results:
-        run_id = results.start_run(notes="grader test run")
+        run_id = begin_run(results, notes="grader test run")
         ids = []
         for trial, (task_id, make_agent, kwargs, _, _) in enumerate(EPISODES):
             record = run_episode(TASKS_BY_ID[task_id], make_agent(), results, trial,
@@ -195,22 +196,50 @@ def test_cli_grade_runs_the_state_grader_and_regrades(run, capsys):
 # -- integrity: fail closed, write nothing -------------------------------------------------
 
 
-def _tamper(db, episode_id, **fields):
+def _tamper(db, table, row_id, **fields):
+    key = "episode_id" if table == "state_diffs" else "id"
     with Results(db) as results, results._conn:
         for column, value in fields.items():
-            results._conn.execute(f"UPDATE state_diffs SET {column} = ? WHERE episode_id = ?",
-                                  (value, episode_id))
+            results._conn.execute(f"UPDATE {table} SET {column} = ? WHERE {key} = ?",
+                                  (value, row_id))
 
 
-@pytest.mark.parametrize("tamper, message", [
-    ({"digest_before": "0" * 64}, "the seed changed"),
-    ({"digest_after": "0" * 64}, "not the recorded digest_after"),
-    ({"diff_json": json.dumps({"added": [], "removed": [], "changed": []})},
-     "not the recorded digest_after"),
+def _stored_after(db, episode_id):
+    with Results(db) as results:
+        return results.state_diff_for_episode(episode_id)["after_snapshot_json"]
+
+
+@pytest.mark.parametrize("target, fields, message", [
+    ("state_diffs", {"digest_before": "0" * 64}, "not its run's initial state"),
+    ("state_diffs", {"digest_after": "0" * 64}, "not the recorded digest_after"),
+    ("state_diffs", {"diff_json": json.dumps({"added": [], "changed": [], "removed": []})},
+     "diff_json is not diff"),
+    ("runs", {"initial_digest": "0" * 64}, "initial_digest"),
 ])
-def test_unreconstructable_episode_stops_grading_before_any_write(run, tamper, message):
-    _tamper(run["db"], run["episode_ids"][3], **tamper)
+def test_inconsistent_stored_state_stops_grading_before_any_write(run, target, fields, message):
+    row_id = run["episode_ids"][3] if target == "state_diffs" else run["run_id"]
+    _tamper(run["db"], target, row_id, **fields)
     with Results(run["db"]) as results, pytest.raises(GradingIntegrityError, match=message):
+        grade_run(run["run_id"], results)
+    assert _row_count(run["db"]) == 0
+
+
+def test_tampered_after_snapshot_is_rejected_before_any_write(run):
+    """Edit the stored after state itself -- un-void the invoice the agent
+    voided -- leaving every digest alone. The snapshot no longer hashes to its
+    recorded digest, so grading refuses before writing anything."""
+    episode_id = run["episode_ids"][0]  # 001 golden path: invoice 12 voided
+    original = _stored_after(run["db"], episode_id)
+    doctored = json.loads(original)
+    for invoice in doctored["invoices"]:
+        if invoice["id"] == 12:
+            invoice["status"] = "active"
+    _tamper(run["db"], "state_diffs", episode_id,
+            after_snapshot_json=json.dumps(doctored, sort_keys=True))
+
+    with Results(run["db"]) as results, pytest.raises(
+        GradingIntegrityError, match="not the recorded digest_after"
+    ):
         grade_run(run["run_id"], results)
     assert _row_count(run["db"]) == 0
 
@@ -225,22 +254,58 @@ def test_unknown_task_stops_grading(run):
 
 
 def test_cli_reports_integrity_failure_as_an_error(run):
-    _tamper(run["db"], run["episode_ids"][0], digest_after="0" * 64)
+    _tamper(run["db"], "state_diffs", run["episode_ids"][0], digest_after="0" * 64)
     rc = main(["--results-db", str(run["db"]), "grade", "--run", str(run["run_id"]),
                "--grader", "state_verifier"])
     assert rc == 2
     assert _row_count(run["db"]) == 0
 
 
-def test_stored_diff_reconstructs_the_exact_recorded_state(run):
-    """The property everything above rests on: seed + stored diff hashes to the
-    digest the harness recorded, for every episode."""
-    seed = seed_snapshot()
+# -- the results DB is the single source of truth ------------------------------------------
+
+
+def test_before_snapshot_is_byte_identical_across_every_episode(run):
+    """Stored once per run. Every episode's digest_before equals it, and since
+    the stored text is exactly what was hashed, equal SHA-256 digests mean
+    byte-identical starting states."""
     with Results(run["db"]) as results:
+        initial = results.get_run(run["run_id"])
+        assert hashlib.sha256(initial["initial_snapshot_json"].encode()).hexdigest() == (
+            initial["initial_digest"])
+        digests = {results.state_diff_for_episode(e)["digest_before"]
+                   for e in run["episode_ids"]}
+    assert digests == {initial["initial_digest"]}
+
+
+def test_stored_snapshots_and_diffs_are_consistent_for_every_episode(run):
+    """What grading relies on: each stored after snapshot hashes to its digest,
+    and each stored diff is exactly diff(initial, after)."""
+    from consequence.diff import diff
+
+    with Results(run["db"]) as results:
+        initial = results.initial_snapshot(run["run_id"])
         for episode_id in run["episode_ids"]:
             stored = results.state_diff_for_episode(episode_id)
-            assert stored["digest_before"] == seed.digest
-            assert apply_stored_diff(seed, stored["diff_json"]).digest == stored["digest_after"]
+            after = snapshot_from_json(stored["after_snapshot_json"])
+            assert after.digest == stored["digest_after"]
+            assert diff(initial, after).to_json() == stored["diff_json"]
+
+
+def test_grading_works_with_seed_sql_deleted_from_disk(run, tmp_path):
+    """The strongest form of the offline guarantee: with env/ -- seed.sql and
+    schema.sql both -- gone from disk, a results.db still grades on its own."""
+    env_dir = SEED_PATH.parent
+    parked = tmp_path / "parked-env"
+    shutil.move(str(env_dir), str(parked))
+    try:
+        assert not SEED_PATH.exists() and not env_dir.exists()
+        with Results(run["db"]) as results:
+            summary = grade_run(run["run_id"], results)
+    finally:
+        shutil.move(str(parked), str(env_dir))
+    assert SEED_PATH.exists()
+    assert [(g.passed, g.status) for g in summary.graded] == [
+        (expect_pass, status) for _, _, _, expect_pass, status in EPISODES]
 
 
 # -- live: real Postgres for the run, environment unreachable for the grading --------------
@@ -248,21 +313,27 @@ def test_stored_diff_reconstructs_the_exact_recorded_state(run):
 
 @pytest.mark.live
 def test_live_seed_snapshot_matches_offline_seed():
-    """Offline grading needs env/seed.sql to hash exactly like a live snapshot."""
+    """The offline environment (tests, adversaries) must start from exactly the
+    state a live reset() produces."""
     from consequence.environment import reset, snapshot
+    from consequence.offline import parse_seed, snapshot_of
 
     reset()
-    assert snapshot().digest == seed_snapshot().digest
+    assert snapshot().digest == snapshot_of(parse_seed()).digest
 
 
 @pytest.mark.live
 def test_live_run_grades_offline_with_environment_unreachable(tmp_path, monkeypatch):
     db = tmp_path / "results.db"
     with Results(db) as results:
-        run_id = results.start_run()
+        run_id = begin_run(results)
         for trial, (task_id, make_agent, kwargs, _, _) in enumerate(EPISODES):
             run_episode(TASKS_BY_ID[task_id], make_agent(), results, trial, run_id=run_id,
                         **kwargs)
+        # Real reset() between every episode: all eight started byte-identical.
+        initial_digest = results.get_run(run_id)["initial_digest"]
+        assert {results.state_diff_for_episode(e["id"])["digest_before"]
+                for e in results.episodes_for_run(run_id)} == {initial_digest}
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://nobody@127.0.0.1:1/unreachable")
     with Results(db) as results:
