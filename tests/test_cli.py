@@ -303,7 +303,8 @@ def test_do_nothing_agent_is_reported_split_not_blended(db_path, offline_env, ca
 
 def test_run_passes_the_tasks_own_turn_budget_to_the_harness(db_path, monkeypatch):
     """023 needs ~21 single-call turns; the CLI must hand the harness its
-    max_turns, not the default. run_episode is stubbed, so no DB is needed."""
+    max_turns, not the default. begin_run and run_episode are stubbed, so no
+    DB is needed."""
     from types import SimpleNamespace
 
     from consequence import cli
@@ -316,6 +317,7 @@ def test_run_passes_the_tasks_own_turn_budget_to_the_harness(db_path, monkeypatc
         seen[task.id] = max_turns
         return SimpleNamespace(turn_count=0, status="completed", latency_ms=0, cost_usd=None)
 
+    monkeypatch.setattr(cli, "begin_run", seed_run)  # the real one resets Postgres
     monkeypatch.setattr(cli, "run_episode", fake_run_episode)
     for task_id in ("023_volume", "001_void_duplicate"):
         assert main(["--results-db", db_path, "run", "--task", task_id, "--model", "mock-1"],
