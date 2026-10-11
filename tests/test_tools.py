@@ -12,6 +12,7 @@ import pytest
 from consequence.db import connect
 from consequence.diff import diff
 from consequence.environment import reset, snapshot
+from consequence.offline import parse_seed
 from consequence.tools import call_tool
 
 pytestmark = pytest.mark.live
@@ -37,13 +38,50 @@ def _audit_rows(table_name: str, row_id: int) -> list[tuple]:
 # -- READ tools --------------------------------------------------------
 
 
+def _seed_invoice_ids_of(supplier_name: str) -> set[int]:
+    """Derived from env/seed.sql, so these expectations can't go stale again."""
+    seed = parse_seed()
+    supplier_ids = {s["id"] for s in seed["suppliers"] if s["name"] == supplier_name}
+    assert len(supplier_ids) == 1, supplier_name
+    return {i["id"] for i in seed["invoices"] if i["supplier_id"] in supplier_ids}
+
+
+def _queried_ids(supplier_name: str) -> set[int]:
+    result = call_tool("query_invoices", {"supplier_name": supplier_name, "limit": 200})
+    assert result["ok"] is True, result["error"]
+    assert result["data"]["total_count"] == len(result["data"]["invoices"])
+    return {row["id"] for row in result["data"]["invoices"]}
+
+
 def test_query_invoices_filters_by_supplier_name():
-    result = call_tool("query_invoices", {"supplier_name": "Acme"})
-    assert result["ok"] is True
-    ids = {row["id"] for row in result["data"]["invoices"]}
-    # Acme (supplier 1) has the duplicate pair: invoices 1 and 12.
-    assert ids == {1, 12}
-    assert result["data"]["total_count"] == 2
+    # A unique part of a name ("Acme") resolves to that one supplier: all of
+    # its invoices, the planted duplicate pair (1, 12) included.
+    expected = _seed_invoice_ids_of("Acme Manufacturing Ltd")
+    assert {1, 12} <= expected
+    assert _queried_ids("Acme") == expected
+
+
+@pytest.mark.parametrize("name", ["Blue Ridge Logistics", "Blue Ridge Logistic Co"])
+def test_query_invoices_confusable_supplier_returns_only_that_supplier(name):
+    """The seed's near-identical pair: each full name returns its own
+    invoices and none of the other's."""
+    assert _queried_ids(name) == _seed_invoice_ids_of(name)
+    assert _queried_ids(name.upper()) == _seed_invoice_ids_of(name)  # case-insensitive
+
+
+def test_query_invoices_refuses_a_name_matching_several_suppliers():
+    """A part of a name shared by both Blue Ridge suppliers must not silently
+    return a mix of their invoices -- it's refused, naming both."""
+    result = call_tool("query_invoices", {"supplier_name": "Blue Ridge Logistic"})
+    assert result["ok"] is False
+    assert "Blue Ridge Logistics" in result["error"]
+    assert "Blue Ridge Logistic Co" in result["error"]
+
+
+@pytest.mark.parametrize("pattern", ["%", "_", "Blue Ridge%", "Logistic_"])
+def test_query_invoices_treats_like_wildcards_as_literal_text(pattern):
+    """'%' used to match every supplier: model input was pattern syntax."""
+    assert _queried_ids(pattern) == set()
 
 
 def test_query_invoices_filters_by_status_and_respects_limit():

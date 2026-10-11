@@ -124,14 +124,42 @@ def _record_audit(conn, table_name: str, row_id: int, action: str) -> None:
 # -- READ ------------------------------------------------------------------
 
 
+def _like_escape(text: str) -> str:
+    """Make model input literal inside a LIKE/ILIKE pattern: without this, a
+    supplied '%' or '_' is pattern syntax, and '%' matches every supplier."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def pick_supplier(query: str, candidates: list[tuple[int, str]]) -> int | None:
+    """Resolve a supplier_name filter to ONE supplier id, or refuse.
+
+    `candidates` are the (id, name) of every supplier whose name contains
+    `query`, case-insensitively. An exact (case-insensitive) full-name match
+    wins, so a name that's a prefix of another supplier's name stays usable.
+    Otherwise the query must match exactly one supplier. A query matching
+    several is refused, listing them, rather than silently returning a mix
+    of different suppliers' invoices. None means nothing matched.
+    """
+    wanted = query.strip().casefold()
+    exact = [c for c in candidates if c[1].casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0][0]
+    if len(candidates) == 1 and not exact:
+        return candidates[0][0]
+    if not candidates:
+        return None
+    names = ", ".join(repr(name) for _, name in (exact or candidates))
+    raise ToolError(
+        f"supplier_name {query!r} matches {len(exact or candidates)} suppliers: {names}. "
+        "Use the full name of the one you mean."
+    )
+
+
 def _query_invoices(args: dict[str, Any]) -> dict[str, Any]:
     limit = args.get("limit", DEFAULT_LIMIT)
 
     conditions: list[str] = []
     params: list[Any] = []
-    if "supplier_name" in args:
-        conditions.append("s.name ILIKE %s")
-        params.append(f"%{args['supplier_name']}%")
     if "status" in args:
         conditions.append("i.status = %s")
         params.append(args["status"])
@@ -157,6 +185,18 @@ def _query_invoices(args: dict[str, Any]) -> dict[str, Any]:
         "i.total, i.vat, i.status, i.created_at"
     )
     with connect() as conn, conn.cursor() as cur:
+        if "supplier_name" in args:
+            cur.execute(
+                "SELECT id, name FROM suppliers WHERE name ILIKE %s ORDER BY id",
+                (f"%{_like_escape(args['supplier_name'])}%",),
+            )
+            supplier_id = pick_supplier(args["supplier_name"], cur.fetchall())
+            if supplier_id is None:
+                return {"invoices": [], "total_count": 0}
+            conditions.append("i.supplier_id = %s")
+            params.append(supplier_id)
+            where = f"WHERE {' AND '.join(conditions)}"
+
         cur.execute(
             f"SELECT COUNT(*) FROM invoices i JOIN suppliers s ON s.id = i.supplier_id {where}",
             params,
@@ -179,7 +219,7 @@ def _list_suppliers(args: dict[str, Any]) -> dict[str, Any]:
     params: list[Any] = []
     if "name_contains" in args:
         conditions.append("name ILIKE %s")
-        params.append(f"%{args['name_contains']}%")
+        params.append(f"%{_like_escape(args['name_contains'])}%")
     if "status" in args:
         conditions.append("status = %s")
         params.append(args["status"])

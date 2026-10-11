@@ -8,26 +8,35 @@ version = "0.0.1"
 description = "A benchmark that grades LLM agents on final database state rather than on their own transcripts."
 readme = "README.md"
 requires-python = ">=3.11"
+# Every direct dependency is pinned exactly (==). Two incidents so far came from
+# a dependency changing shape under an unpinned constraint (mcp's low-level
+# Server API and its pydantic attribute names). Bump deliberately: change the
+# pin, run `pytest` and `pytest -m live`, and commit the pin with the fix.
 dependencies = [
-    "psycopg[binary]>=3.1",
-    "mcp>=1.9.0",
-    "pyyaml>=6.0",
+    "psycopg[binary]==3.3.5",
+    "mcp==2.2.0",
+    "anyio==4.13.0",  # imported directly (mcp_server.py, tests); was only transitive via mcp
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "ruff",
-    "python-dotenv",
+    "pytest==9.1.1",
+    "ruff==0.16.6",  # a new ruff can add lint rules and turn CI red with no code change
+    "python-dotenv==1.2.2",
 ]
 # Only needed to actually call a real model (run_turn()); the adapters'
 # tool/message translation is unit-tested offline without these installed.
 # openrouter.py reuses the `openai` package (OpenRouter's endpoint is
 # OpenAI-wire-compatible), so it needs no separate SDK.
+# These pins are checked only to the extent that every SDK symbol the adapters
+# call exists in them (client classes, create methods, error types). No real
+# API call has been made yet -- run the @pytest.mark.smoke tests before relying
+# on them.
 providers = [
-    "anthropic>=0.72",
-    "openai>=2.0",
-    "google-genai>=1.0",
+    "anthropic==1.13.0",
+    "openai==3.28.0",
+    "google-genai==1.73.1",
 ]
 
 [tool.setuptools.packages.find]

@@ -75,14 +75,19 @@ TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="query_invoices",
         description=(
-            "Search invoices by supplier name substring, exact status, total range, "
-            "invoice_date range, and/or exact invoice number. Read-only: never modifies "
+            "Search invoices by supplier, exact status, total range, invoice_date range, "
+            "and/or exact invoice number. supplier_name must identify ONE supplier: its full "
+            "name, or part of a name that matches only that supplier; a part matching several "
+            "suppliers is refused with the candidates listed. Read-only: never modifies "
             "data. Returns {'invoices': [...], 'total_count': int}. At most `limit` rows "
             "are returned in 'invoices'; if total_count is greater than the number of rows "
             "returned, the results were truncated -- narrow the filters or raise `limit`."
         ),
         parameters=(
-            ToolParameter("supplier_name", "string", "Substring match on supplier name"),
+            ToolParameter(
+                "supplier_name", "string",
+                "One supplier: its full name, or a part of it that matches no other supplier",
+            ),
             ToolParameter("status", "string", "Exact invoice status", enum=INVOICE_STATUSES),
             ToolParameter("min_total", "number", "Minimum invoice total, inclusive", minimum=0),
             ToolParameter("max_total", "number", "Maximum invoice total, inclusive", minimum=0),

@@ -20,3 +20,36 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest
+
+  # The @pytest.mark.live suite, against a real postgres:16. Without this job
+  # the live tests only ran when someone remembered `make test-live`, and four
+  # of them were red for several commits without anyone knowing.
+  live:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: consequence
+          POSTGRES_PASSWORD: consequence
+          POSTGRES_DB: consequence
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U consequence -d consequence"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://consequence:consequence@localhost:5432/consequence
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Live tests
+        run: pytest -m live

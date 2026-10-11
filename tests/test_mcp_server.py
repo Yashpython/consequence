@@ -51,8 +51,8 @@ def test_read_tool_end_to_end_matches_impl_directly():
         types.CallToolRequestParams(name="get_invoice", arguments={"invoice_id": 3}),
     )
 
-    assert call_result.isError is False
-    assert call_result.structuredContent == direct
+    assert call_result.is_error is False
+    assert call_result.structured_content == direct
     [content] = call_result.content
     assert isinstance(content, types.TextContent)
     assert json.loads(content.text) == direct
@@ -72,8 +72,8 @@ def test_write_tool_end_to_end_matches_impl_directly():
         types.CallToolRequestParams(name="flag_for_review", arguments=args),
     )
 
-    assert call_result.isError is False
-    assert call_result.structuredContent == direct
+    assert call_result.is_error is False
+    assert call_result.structured_content == direct
     [content] = call_result.content
     assert isinstance(content, types.TextContent)
     assert json.loads(content.text) == direct

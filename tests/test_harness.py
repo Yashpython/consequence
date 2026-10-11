@@ -51,7 +51,14 @@ def test_scripted_correct_agent_produces_expected_diff_and_completes(results):
     assert record.error is None
     assert record.turn_count == 2
     assert record.diff.changed == [("invoices", 2, {"status": ("active", "void")})]
-    assert record.diff.added == []  # touched() excludes audit_log by default in this check
+    # diff.added includes audit_log -- it's touched() that leaves audit_log out.
+    # So: no domain rows were added, and exactly one audit row records the void.
+    assert [row for table, _, row in record.diff.added if table != "audit_log"] == []
+    audit = [row for table, _, row in record.diff.added if table == "audit_log"]
+    assert len(audit) == 1
+    assert {k: audit[0][k] for k in ("table_name", "row_id", "action", "actor")} == {
+        "table_name": "invoices", "row_id": 2, "action": "void_invoice", "actor": "agent",
+    }
     assert record.diff.touched() == {("invoices", 2)}
 
     episodes = results.episodes_for_run(record.run_id)

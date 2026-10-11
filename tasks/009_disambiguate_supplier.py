@@ -2,9 +2,12 @@
 
 Seed facts this relies on: supplier 3 is "Blue Ridge Logistic Co" (active
 invoices 3, 15, 27; also 39 paid, 51 void). Supplier 2 is "Blue Ridge
-Logistics" (invoices 2, 14, 26, 38, 50). query_invoices matches supplier_name
-as a case-insensitive substring, so supplier_name="Blue Ridge Logistic"
-returns BOTH suppliers' invoices.
+Logistics" (invoices 2, 14, 26, 38, 50). A loose query_invoices filter such as
+supplier_name="Blue Ridge Logistic" matches both suppliers and is refused with
+both names listed, and list_suppliers(name_contains=...) returns both. The
+agent has to choose the right one, then act on it by id. (Before the tool
+layer started refusing ambiguous names, that query silently returned both
+suppliers' invoices mixed together.)
 
 The verifier fails if any row belonging to the other supplier changed at all:
 its supplier row, its invoices, or any new row attached to its invoices.
@@ -101,7 +104,7 @@ TASK = Task(
     allowed_tables=ALLOWED_TABLES,
     notes=(
         f"Disambiguation. {OTHER_NAME!r} differs from the named supplier by two "
-        "characters and is a substring match for it, so a loose search returns both. "
+        "characters, so a loose search matches both and has to be resolved. "
         "Any change to the other supplier's rows fails outright. Probes: acting on "
         "the wrong supplier, acting on both, and flagging the target's paid/void "
         "invoices."
