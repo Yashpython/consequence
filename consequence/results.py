@@ -36,7 +36,7 @@ DEFAULT_DB_PATH = "results/results.db"
 # Bump on any schema change. A results.db with a different version is refused
 # outright. There are no migrations: no real runs exist yet, so the remedy is
 # to delete the file and re-run.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class ResultsSchemaError(RuntimeError):
@@ -118,8 +118,10 @@ CREATE TABLE IF NOT EXISTS state_diffs (
 -- both a state_verifier and an llm_judge over the same episode). 'collateral'
 -- is not a pass/fail judge of the task: its passed flag means "no rows outside
 -- the task's scope were touched" (see consequence/collateral.py). A given
--- (episode_id, grader) pair is unique: re-grading replaces the prior verdict
--- rather than appending a new one, so offline re-scoring is safe to re-run.
+-- (episode_id, grader, judge_model) is unique: re-grading replaces the prior
+-- verdict rather than appending a new one, so re-scoring is safe to re-run.
+-- judge_model is '' for the deterministic graders and the judge's models.yaml
+-- id for llm_judge / llm_judge_stability, so results always split by judge.
 --
 -- Two notions of success, kept in separate columns so later code can't mix
 -- them up:
@@ -131,21 +133,48 @@ CREATE TABLE IF NOT EXISTS state_diffs (
 --                        aggregated into a pass rate. NULL for graders that
 --                        have no separate verifier verdict.
 -- status 'grading_error' means the grader itself raised: there is no verdict
--- (passed is NULL, the traceback is stored). It is neither a pass nor a fail.
+-- (passed is NULL, the traceback is stored). status 'judge_error' means the
+-- judge couldn't render one (error_reason says why, e.g. 'context_overflow').
+-- Neither is a pass or a fail.
+--
+-- Judge rows (see consequence/graders/judge.py): passed is the majority of
+-- three votes; behaviour, confidence and the token/cost columns describe the
+-- judging, never the episode. Agreement among the three votes is stored under
+-- a name that says what it measures: judge_api_agreement only at temperature 0
+-- (API-level nondeterminism), judge_vote_agreement only above 0 (sampling
+-- stability). judge_cost_usd is judging spend, kept out of episodes.cost_usd.
 CREATE TABLE IF NOT EXISTS gradings (
     id                   INTEGER PRIMARY KEY,
     episode_id           INTEGER NOT NULL REFERENCES episodes (id),
-    grader               TEXT NOT NULL
-                         CHECK (grader IN ('state_verifier', 'llm_judge', 'collateral')),
-    status               TEXT NOT NULL CHECK (status IN ('graded', 'grading_error')),
+    grader               TEXT NOT NULL CHECK (grader IN ('state_verifier', 'llm_judge',
+                                                         'llm_judge_stability', 'collateral')),
+    judge_model          TEXT NOT NULL DEFAULT '',
+    status               TEXT NOT NULL
+                         CHECK (status IN ('graded', 'grading_error', 'judge_error')),
     passed               INTEGER CHECK (passed IN (0, 1)),
     verifier_verdict_raw INTEGER CHECK (verifier_verdict_raw IN (0, 1)),
+    behaviour            TEXT CHECK (behaviour IN ('refused_and_explained', 'silent_inaction',
+                                                   'false_claim', 'acted_incorrectly',
+                                                   'completed')),
+    confidence           REAL CHECK (confidence BETWEEN 0 AND 1),
+    judge_temperature    REAL,
+    judge_api_agreement  REAL CHECK (judge_api_agreement BETWEEN 0 AND 1),
+    judge_vote_agreement REAL CHECK (judge_vote_agreement BETWEEN 0 AND 1),
+    judge_input_tokens   INTEGER,
+    judge_output_tokens  INTEGER,
+    judge_cost_usd       REAL,
+    error_reason         TEXT,
     error_traceback      TEXT,
     detail_json          TEXT,
     graded_at            TEXT NOT NULL,
-    UNIQUE (episode_id, grader),
+    UNIQUE (episode_id, grader, judge_model),
     CHECK ((status = 'graded') = (passed IS NOT NULL)),
-    CHECK ((status = 'grading_error') = (error_traceback IS NOT NULL))
+    CHECK (status != 'grading_error' OR error_traceback IS NOT NULL),
+    CHECK (status != 'judge_error' OR error_reason IS NOT NULL),
+    CHECK (status != 'graded' OR (error_traceback IS NULL AND error_reason IS NULL)),
+    CHECK ((grader IN ('llm_judge', 'llm_judge_stability')) = (judge_model != '')),
+    CHECK (judge_api_agreement IS NULL OR judge_temperature = 0),
+    CHECK (judge_vote_agreement IS NULL OR judge_temperature > 0)
 );
 """
 
@@ -430,8 +459,9 @@ class Results:
         re-scoring pass is safe to run as many times as needed.
         """
         raw = None if verifier_verdict_raw is None else int(verifier_verdict_raw)
-        return self._upsert_grading(episode_id, grader, "graded", int(passed), raw, None,
-                                    detail_json, graded_at)
+        return self._upsert_grading(episode_id, grader, status="graded", passed=int(passed),
+                                    verifier_verdict_raw=raw, detail_json=_json(detail_json),
+                                    graded_at=graded_at)
 
     def record_grading_error(
         self,
@@ -444,34 +474,97 @@ class Results:
         """Record that the grader raised on this episode: no verdict, so
         passed is NULL -- not a failure -- and the traceback is kept.
         Replaces any prior row for (episode_id, grader), like record_grading."""
-        return self._upsert_grading(episode_id, grader, "grading_error", None, None,
-                                    error_traceback, detail_json, graded_at)
+        return self._upsert_grading(episode_id, grader, status="grading_error",
+                                    error_traceback=error_traceback,
+                                    detail_json=_json(detail_json), graded_at=graded_at)
 
-    def _upsert_grading(self, episode_id: int, grader: str, status: str, passed: int | None,
-                        verifier_verdict_raw: int | None, error_traceback: str | None,
-                        detail_json: Any, graded_at: str | None) -> int:
+    def record_judge_grading(
+        self,
+        episode_id: int,
+        grader: str,
+        judge_model: str,
+        *,
+        passed: bool,
+        behaviour: str | None,
+        confidence: float | None,
+        temperature: float,
+        agreement: float,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float | None,
+        detail_json: Any = None,
+    ) -> int:
+        """A judge's majority verdict. `agreement` is stored as
+        judge_api_agreement at temperature 0 and as judge_vote_agreement above
+        it: the same arithmetic measures different things (see
+        docs/judge-methodology.md), so it never shares a column."""
+        at_zero = temperature == 0
+        return self._upsert_grading(
+            episode_id, grader, judge_model, status="graded", passed=int(passed),
+            behaviour=behaviour, confidence=confidence, judge_temperature=temperature,
+            judge_api_agreement=agreement if at_zero else None,
+            judge_vote_agreement=None if at_zero else agreement,
+            judge_input_tokens=input_tokens, judge_output_tokens=output_tokens,
+            judge_cost_usd=cost_usd, detail_json=_json(detail_json),
+        )
+
+    def record_judge_error(
+        self,
+        episode_id: int,
+        grader: str,
+        judge_model: str,
+        *,
+        reason: str,
+        temperature: float,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float | None = 0.0,
+        error_traceback: str | None = None,
+        detail_json: Any = None,
+    ) -> int:
+        """The judge rendered no verdict. Tokens already spent are still
+        recorded, so judging cost is complete even when judging fails."""
+        return self._upsert_grading(
+            episode_id, grader, judge_model, status="judge_error", error_reason=reason,
+            error_traceback=error_traceback, judge_temperature=temperature,
+            judge_input_tokens=input_tokens, judge_output_tokens=output_tokens,
+            judge_cost_usd=cost_usd, detail_json=_json(detail_json),
+        )
+
+    _GRADING_COLUMNS = (
+        "status", "passed", "verifier_verdict_raw", "behaviour", "confidence",
+        "judge_temperature", "judge_api_agreement", "judge_vote_agreement",
+        "judge_input_tokens", "judge_output_tokens", "judge_cost_usd", "error_reason",
+        "error_traceback", "detail_json", "graded_at",
+    )
+
+    def _upsert_grading(self, episode_id: int, grader: str, judge_model: str = "",
+                        **values: Any) -> int:
+        """Insert or replace the row for (episode_id, grader, judge_model).
+        Every column not given is reset to NULL, so a replaced row never keeps
+        a stale field from the verdict it replaces."""
+        unknown = set(values) - set(self._GRADING_COLUMNS)
+        if unknown:
+            raise ValueError(f"unknown gradings column(s): {sorted(unknown)}")
+        values["graded_at"] = values.get("graded_at") or _now()
+        row = [values.get(c) for c in self._GRADING_COLUMNS]
+        columns = ", ".join(self._GRADING_COLUMNS)
+        updates = ", ".join(f"{c} = excluded.{c}" for c in self._GRADING_COLUMNS)
+        placeholders = ", ".join("?" * len(row))
         with self._conn:
             self._conn.execute(
-                """
-                INSERT INTO gradings (episode_id, grader, status, passed, verifier_verdict_raw,
-                                      error_traceback, detail_json, graded_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (episode_id, grader) DO UPDATE SET
-                    status = excluded.status,
-                    passed = excluded.passed,
-                    verifier_verdict_raw = excluded.verifier_verdict_raw,
-                    error_traceback = excluded.error_traceback,
-                    detail_json = excluded.detail_json,
-                    graded_at = excluded.graded_at
+                f"""
+                INSERT INTO gradings (episode_id, grader, judge_model, {columns})
+                VALUES (?, ?, ?, {placeholders})
+                ON CONFLICT (episode_id, grader, judge_model) DO UPDATE SET {updates}
                 """,
-                (episode_id, grader, status, passed, verifier_verdict_raw, error_traceback,
-                 _json(detail_json), graded_at or _now()),
+                (episode_id, grader, judge_model, *row),
             )
-        row = self._conn.execute(
-            "SELECT id FROM gradings WHERE episode_id = ? AND grader = ?",
-            (episode_id, grader),
+        found = self._conn.execute(
+            "SELECT id FROM gradings WHERE episode_id = ? AND grader = ? AND judge_model = ?",
+            (episode_id, grader, judge_model),
         ).fetchone()
-        return row["id"]
+        return found["id"]
 
     # -- reads ---------------------------------------------------------
 
@@ -489,7 +582,29 @@ class Results:
 
     def gradings_for_episode(self, episode_id: int) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT * FROM gradings WHERE episode_id = ? ORDER BY grader", (episode_id,)
+            "SELECT * FROM gradings WHERE episode_id = ? ORDER BY grader, judge_model",
+            (episode_id,),
+        ).fetchall()
+        return [_row(r) for r in rows]
+
+    def episodes_graded_by(self, run_id: int, grader: str,
+                           judge_model: str = "") -> set[int]:
+        """Ids of the run's episodes with a row (any status) from this grader.
+        Two graders' pass rates are only comparable over the same set."""
+        rows = self._conn.execute(
+            """
+            SELECT g.episode_id FROM gradings g JOIN episodes e ON e.id = g.episode_id
+            WHERE e.run_id = ? AND g.grader = ? AND g.judge_model = ?
+            """,
+            (run_id, grader, judge_model),
+        ).fetchall()
+        return {r["episode_id"] for r in rows}
+
+    def transcript_for_episode(self, episode_id: int) -> list[dict[str, Any]]:
+        """Every stored turn of the episode, in order, exactly as stored."""
+        rows = self._conn.execute(
+            "SELECT * FROM transcripts WHERE episode_id = ? ORDER BY turn_index",
+            (episode_id,),
         ).fetchall()
         return [_row(r) for r in rows]
 

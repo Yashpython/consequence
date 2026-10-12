@@ -128,6 +128,9 @@ class GoogleProvider:
     api_key: str | None = None
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     max_retries: int = 5
+    # None sends no temperature, so the provider's default applies. Set for
+    # judging (consequence.graders.judge), where it is part of the condition.
+    temperature: float | None = None
     _client: Any = field(default=None, init=False, repr=False)
 
     def _get_client(self) -> Any:
@@ -137,23 +140,26 @@ class GoogleProvider:
             self._client = genai.Client(api_key=self.api_key)
         return self._client
 
-    def run_turn(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> TurnResult:
-        client = self._get_client()
+    def _request(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> dict[str, Any]:
+        """The keyword arguments for models.generate_content(), built without the SDK."""
         system, contents = translate_messages(messages)
-        gemini_tools = translate_tools(tools)
-
         config: dict[str, Any] = {
             "max_output_tokens": self.max_output_tokens,
-            "tools": gemini_tools,
+            "tools": translate_tools(tools),
         }
         if system is not None:
             config["system_instruction"] = system
+        if self.temperature is not None:
+            config["temperature"] = self.temperature
+        return {"model": self.api_model, "contents": contents, "config": config}
+
+    def run_turn(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> TurnResult:
+        client = self._get_client()
+        kwargs = self._request(messages, tools)
 
         def _call() -> tuple[Any, int]:
             start = time.monotonic()
-            response = client.models.generate_content(
-                model=self.api_model, contents=contents, config=config
-            )
+            response = client.models.generate_content(**kwargs)
             return response, int((time.monotonic() - start) * 1000)
 
         (response, elapsed_ms), retry_count = call_with_backoff(

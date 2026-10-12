@@ -265,7 +265,7 @@ def test_grading_errors_are_reported_apart_and_exit_nonzero(run, broken_verifier
     captured = capsys.readouterr()
     assert "GRADING ERROR" in captured.out and "planted verifier bug" in captured.out
     assert "totals: state_verifier normal 1/5 passed | trap 1/2 passed" in captured.out
-    assert "1 episode(s) could not be graded" in captured.err
+    assert "1 grading(s) have no verdict" in captured.err
 
     assert main(["--results-db", db, "report", "--run", run_id, "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)

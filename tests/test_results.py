@@ -164,8 +164,49 @@ def test_gradings_constraints_keep_verdicts_and_errors_apart(results, status, pa
     run_id = seed_run(results)
     episode_id = _make_episode(results, run_id)
     with pytest.raises(sqlite3.IntegrityError):
-        results._upsert_grading(episode_id, "state_verifier", status, passed, None,
-                                traceback_text, None, None)
+        results._upsert_grading(episode_id, "state_verifier", status=status, passed=passed,
+                                error_traceback=traceback_text)
+
+
+@pytest.mark.parametrize("columns", [
+    {"status": "judge_error"},                                   # an error needs its reason
+    {"status": "judge_error", "error_reason": "x", "passed": 0},  # and is never also a fail
+    {"status": "graded", "passed": 1, "error_reason": "x"},      # a verdict has no error
+    {"status": "graded", "passed": 1, "judge_temperature": 0.7,
+     "judge_api_agreement": 1.0},           # API agreement exists only at temperature 0
+    {"status": "graded", "passed": 1, "judge_temperature": 0.0,
+     "judge_vote_agreement": 1.0},          # vote agreement exists only above 0
+    {"status": "graded", "passed": 1, "behaviour": "probably_fine"},  # closed vocabulary
+    {"status": "graded", "passed": 1, "confidence": 1.5},        # confidence is 0..1
+])
+def test_judge_row_constraints(results, columns):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        results._upsert_grading(episode_id, "llm_judge", "judge-x", **columns)
+
+
+def test_judge_rows_need_a_judge_model_and_other_rows_must_not_have_one(results):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        results._upsert_grading(episode_id, "llm_judge", status="graded", passed=1)
+    with pytest.raises(sqlite3.IntegrityError):
+        results._upsert_grading(episode_id, "state_verifier", "judge-x", status="graded",
+                                passed=1)
+
+
+def test_two_judges_on_one_episode_are_two_rows_and_regrading_replaces(results):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    for judge in ("judge-a", "judge-b", "judge-a"):
+        results.record_judge_grading(episode_id, "llm_judge", judge, passed=True,
+                                     behaviour="completed", confidence=0.8, temperature=0.0,
+                                     agreement=1.0, input_tokens=1, output_tokens=1,
+                                     cost_usd=0.0)
+    rows = results.gradings_for_episode(episode_id)
+    assert [(r["grader"], r["judge_model"]) for r in rows] == [
+        ("llm_judge", "judge-a"), ("llm_judge", "judge-b")]
 
 
 def test_regrading_is_idempotent_and_replaces(results):
@@ -191,7 +232,9 @@ def test_regrading_is_idempotent_and_replaces(results):
     assert json.loads(row["detail_json"]) == {"fixed": "grader bug"}
 
     # a second grader on the same episode is a separate row, not a replacement
-    results.record_grading(episode_id, "llm_judge", passed=True)
+    results.record_judge_grading(episode_id, "llm_judge", "judge-x", passed=True, behaviour="completed",
+                                 confidence=0.9, temperature=0.0, agreement=1.0,
+                                 input_tokens=10, output_tokens=5, cost_usd=0.001)
     count = results._conn.execute(
         "SELECT COUNT(*) AS n FROM gradings WHERE episode_id = ?", (episode_id,)
     ).fetchone()["n"]
@@ -232,7 +275,9 @@ def test_episodes_needing_grading_and_ungraded_by(results):
     graded_by_none = _make_episode(results, run_id, trial_index=2)
 
     results.record_grading(graded_by_both, "state_verifier", passed=True)
-    results.record_grading(graded_by_both, "llm_judge", passed=True)
+    results.record_judge_grading(graded_by_both, "llm_judge", "judge-x", passed=True, behaviour="completed",
+                                 confidence=0.9, temperature=0.0, agreement=1.0,
+                                 input_tokens=10, output_tokens=5, cost_usd=0.001)
     results.record_grading(graded_by_one, "state_verifier", passed=True)
 
     needing = {row["id"] for row in results.episodes_needing_grading(run_id)}

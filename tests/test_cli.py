@@ -10,7 +10,13 @@ from __future__ import annotations
 import json
 
 import pytest
-from helpers import record_episode_with_state, seed_run
+from helpers import (
+    TEST_JUDGES,
+    record_episode_with_state,
+    seed_run,
+    stub_judge_factory,
+    verdict,
+)
 
 from consequence.cli import main
 from consequence.diff import diff
@@ -104,96 +110,124 @@ def _seed_two_episodes(db_path: str) -> tuple[int, int, int]:
     return run_id, changed_ep, noop_ep
 
 
-def _trivial_verifier(episode, diff_json):
-    passed = bool(diff_json["added"] or diff_json["removed"] or diff_json["changed"])
-    return passed, {"reason": "state changed" if passed else "no-op"}
+def _changed_state_passes(user_message, vote):
+    """Stub judge: passes an episode whose transcript shows a write."""
+    wrote = "tool: void_invoice" in user_message
+    return verdict(wrote, "completed" if wrote else "silent_inaction")
 
 
-def test_grade_unimplemented_grader_is_a_clean_error(db_path, capsys):
-    run_id, _, _ = _seed_two_episodes(db_path)
-    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"])
-    assert rc == 2
-    assert "not implemented yet" in capsys.readouterr().err  # the right reason, not another
+@pytest.fixture
+def judges(monkeypatch):
+    """A configured judge registry. The real one has no context windows set,
+    so it refuses to run, by design (see the test below)."""
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: TEST_JUDGES)
+    return TEST_JUDGES
 
+
+def _grade(db_path, run_id, *extra, factory=None):
+    return main(["--results-db", db_path, "grade", "--run", str(run_id), *extra],
+                judge_provider_factory=factory or stub_judge_factory(_changed_state_passes))
+
+
+def _rows(db_path):
     with Results(db_path) as results:
-        assert results.episodes_needing_grading(run_id=run_id) != []
+        return results._conn.execute("SELECT COUNT(*) FROM gradings").fetchone()[0]
 
 
-def test_grade_all_fails_closed_when_a_registered_grader_cannot_run(db_path, capsys):
-    """llm_judge is registered but not implemented. --grader all must refuse
-    and name it -- not quietly run state_verifier alone and exit 0, which
-    would pass off a partial grading as a complete one."""
+def test_the_real_judges_refuse_to_run_until_their_context_window_is_set(db_path, capsys):
+    """models.yaml's judges have no context_window_tokens yet: the overflow
+    check can't work without one, so grading refuses and writes nothing."""
     run_id, _, _ = _seed_two_episodes(db_path)
-    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "all"])
-    assert rc != 0
+    assert _grade(db_path, run_id, "--grader", "llm_judge") == 2
+    assert "context_window_tokens" in capsys.readouterr().err
+    assert _rows(db_path) == 0
+
+
+def test_grade_all_fails_closed_when_the_judge_cannot_run(db_path, capsys, judges):
+    """--grader all must not run the state grader and then discover the
+    judge can't run: that would pass off a partial grading as complete."""
+    run_id, _, _ = _seed_two_episodes(db_path)
+
+    def broken_factory(model_id, registry=None, temperature=None):
+        raise ImportError("No module named 'anthropic'")
+
+    assert _grade(db_path, run_id, "--grader", "all", factory=broken_factory) == 2
     err = capsys.readouterr().err
-    assert "llm_judge" in err and "nothing was graded" in err
-
-    with Results(db_path) as results:  # fail closed: not even the graders that could run
-        assert results._conn.execute("SELECT COUNT(*) FROM gradings").fetchone()[0] == 0
+    assert "the judge can't run, so nothing was graded" in err and "anthropic" in err
+    assert _rows(db_path) == 0  # fail closed: not even the state grader ran
 
 
-def test_grade_all_runs_every_registered_grader_when_all_are_available(db_path, capsys,
-                                                                        monkeypatch):
+def test_grade_all_runs_both_graders(db_path, judges, monkeypatch):
     run_id, changed_ep, _ = _seed_two_episodes(db_path)
     ran = []
-
-    def fake_state(args, results):
-        ran.append("state_verifier")
-        return 0  # no grading errors
-
-    monkeypatch.setattr("consequence.cli._grade_state", fake_state)
-    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "all"],
-              graders={"llm_judge": _trivial_verifier})
-    assert rc == 0
+    monkeypatch.setattr("consequence.cli._grade_state",
+                        lambda args, results: ran.append("state_verifier") or 0)
+    assert _grade(db_path, run_id, "--grader", "all") == 0
     assert ran == ["state_verifier"]
     with Results(db_path) as results:
-        assert [g["grader"] for g in results.gradings_for_episode(changed_ep)] == ["llm_judge"]
+        [row] = results.gradings_for_episode(changed_ep)
+    assert (row["grader"], row["judge_model"]) == ("llm_judge", "judge-test")
 
 
-def test_grade_records_one_row_per_episode(db_path, capsys):
+def test_grade_records_one_judge_row_per_episode(db_path, capsys, judges):
     run_id, changed_ep, noop_ep = _seed_two_episodes(db_path)
-
-    rc = main(
-        ["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"],
-        graders={"llm_judge": _trivial_verifier},
-    )
-    assert rc == 0
-    assert "totals: graded=2" in capsys.readouterr().out
-
+    assert _grade(db_path, run_id, "--grader", "llm_judge") == 0
+    out = capsys.readouterr().out
+    assert "totals: llm_judge [judge-test, temperature 0.0] unknown 1/2 passed" in out
+    assert "judging cost (not part of the experiment's cost)" in out
     with Results(db_path) as results:
         [g1] = results.gradings_for_episode(changed_ep)
         [g2] = results.gradings_for_episode(noop_ep)
-    assert g1["passed"] == 1
-    assert g2["passed"] == 0
+    assert (g1["passed"], g1["behaviour"]) == (1, "completed")
+    assert (g2["passed"], g2["behaviour"]) == (0, "silent_inaction")
 
 
-def test_grade_regrade_replaces_rather_than_duplicates(db_path):
+def test_grade_regrade_replaces_rather_than_duplicates(db_path, judges):
     run_id, changed_ep, _ = _seed_two_episodes(db_path)
-    graders = {"llm_judge": _trivial_verifier}
-
-    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"],
-         graders=graders)
-    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge",
-          "--regrade"], graders=graders)
-
+    _grade(db_path, run_id, "--grader", "llm_judge")
+    _grade(db_path, run_id, "--grader", "llm_judge", "--regrade")
     with Results(db_path) as results:
         assert len(results.gradings_for_episode(changed_ep)) == 1
 
 
-def test_grade_unknown_run_is_a_clean_error(db_path):
-    rc = main(["--results-db", db_path, "grade", "--run", "999", "--grader", "llm_judge"],
-              graders={"llm_judge": _trivial_verifier})
-    assert rc == 2
+def test_grade_unknown_run_is_a_clean_error(db_path, judges):
+    assert _grade(db_path, 999, "--grader", "llm_judge") == 2
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--grader", "state_verifier", "--judge-model", "judge-test"], "apply only to"),
+    (["--grader", "llm_judge", "--judge-model", "nope"], "no judge 'nope'"),
+    (["--grader", "llm_judge", "--judge-subset", "1"], "for second judges only"),
+    (["--grader", "llm_judge", "--judge-stability-subset", "1", "--judge-temperature", "0"],
+     "always runs at temperature"),
+    (["--grader", "llm_judge", "--judge-model", "judge-other-family", "--judge-subset", "9"],
+     "cannot sample 9"),
+])
+def test_judge_flags_are_validated_before_anything_is_written(db_path, capsys, judges, flags,
+                                                              message):
+    run_id, _, _ = _seed_two_episodes(db_path)
+    assert _grade(db_path, run_id, *flags) == 2
+    assert message in capsys.readouterr().err
+    assert _rows(db_path) == 0
+
+
+def test_judge_temperature_reaches_the_judge_provider(db_path, judges):
+    run_id, _, _ = _seed_two_episodes(db_path)
+    made = []
+    _grade(db_path, run_id, "--grader", "llm_judge", "--judge-temperature", "0.3",
+           factory=stub_judge_factory(_changed_state_passes, made))
+    assert [j.temperature for j in made] == [0.3]
+    with Results(db_path) as results:
+        temps = {r[0] for r in results._conn.execute("SELECT judge_temperature FROM gradings")}
+    assert temps == {0.3}
 
 
 # -- report / status ---------------------------------------------------
 
 
-def test_report_json_reflects_persisted_rows(db_path, capsys):
+def test_report_json_reflects_persisted_rows(db_path, capsys, judges):
     run_id, _changed_ep, _noop_ep = _seed_two_episodes(db_path)
-    main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "llm_judge"],
-         graders={"llm_judge": _trivial_verifier})
+    _grade(db_path, run_id, "--grader", "llm_judge")
     capsys.readouterr()  # discard grade output
 
     rc = main(["--results-db", db_path, "report", "--run", str(run_id), "--format", "json"])
@@ -201,8 +235,12 @@ def test_report_json_reflects_persisted_rows(db_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["episode_count"] == 2
     assert report["by_status"] == {"completed": 2}
-    # t1/t2 aren't catalog tasks, so they report under "unknown"
-    assert report["grading"]["llm_judge"] == {"unknown": {"passed": 1, "total": 2}}
+    # t1/t2 aren't catalog tasks, so they report under "unknown"; a judge's
+    # verdicts are keyed by judge, so two judges are never blended.
+    assert report["grading"]["llm_judge:judge-test"] == {"unknown": {"passed": 1, "total": 2}}
+    # Experiment cost is the episodes' own; judging is reported apart.
+    assert report["total_cost_usd"] == pytest.approx(0.011)
+    assert report["judge_cost_usd"] > 0
 
 
 def test_report_unknown_run_is_a_clean_error(db_path):

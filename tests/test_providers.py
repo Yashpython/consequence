@@ -127,6 +127,27 @@ def test_unknown_message_role_raises_in_every_adapter():
             translate(bad)
 
 
+# -- temperature: sent only when set, so the agent runs keep provider defaults ----
+
+
+def _temperature_in(provider) -> object:
+    kwargs = provider._request([{"role": "system", "content": "s"},
+                                {"role": "user", "content": "u"}], TOOLS)
+    return kwargs.get("config", kwargs).get("temperature", "absent")
+
+
+@pytest.mark.parametrize("make", [
+    lambda **kw: anthropic_adapter.AnthropicProvider(model_id="m", api_model="a", **kw),
+    lambda **kw: openai_adapter.OpenAIProvider(model_id="m", api_model="a", **kw),
+    lambda **kw: google_adapter.GoogleProvider(model_id="m", api_model="a", **kw),
+    lambda **kw: openrouter_adapter.OpenRouterProvider(model_id="m", api_model="a", **kw),
+], ids=["anthropic", "openai", "google", "openrouter"])
+def test_temperature_is_sent_only_when_set(make):
+    assert _temperature_in(make()) == "absent"  # agent runs: provider default
+    assert _temperature_in(make(temperature=0.0)) == 0.0  # 0 is a value, not "unset"
+    assert _temperature_in(make(temperature=0.7)) == 0.7
+
+
 # -- cost calculation, unit-tested against known token counts and prices --
 
 

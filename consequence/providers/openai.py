@@ -117,6 +117,9 @@ class OpenAIProvider:
     api_key: str | None = None
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_retries: int = 5
+    # None sends no temperature, so the provider's default applies. Set for
+    # judging (consequence.graders.judge), where it is part of the condition.
+    temperature: float | None = None
     _client: Any = field(default=None, init=False, repr=False)
 
     def _get_client(self) -> Any:
@@ -126,19 +129,25 @@ class OpenAIProvider:
             self._client = openai.OpenAI(api_key=self.api_key)
         return self._client
 
+    def _request(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> dict[str, Any]:
+        """The keyword arguments for chat.completions.create(), built without the SDK."""
+        kwargs: dict[str, Any] = {
+            "model": self.api_model,
+            "max_completion_tokens": self.max_tokens,
+            "messages": translate_messages(messages),
+            "tools": translate_tools(tools),
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        return kwargs
+
     def run_turn(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> TurnResult:
         client = self._get_client()
-        openai_messages = translate_messages(messages)
-        openai_tools = translate_tools(tools)
+        kwargs = self._request(messages, tools)
 
         def _call() -> tuple[Any, int]:
             start = time.monotonic()
-            response = client.chat.completions.create(
-                model=self.api_model,
-                max_completion_tokens=self.max_tokens,
-                messages=openai_messages,
-                tools=openai_tools,
-            )
+            response = client.chat.completions.create(**kwargs)
             return response, int((time.monotonic() - start) * 1000)
 
         (response, elapsed_ms), retry_count = call_with_backoff(

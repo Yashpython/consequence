@@ -50,3 +50,36 @@ models:
     # running anything that spends real money. See docs/models.md.
     input_price_per_million: 0.27
     output_price_per_million: 1.10
+
+# The judges: models that grade transcripts (consequence/graders/judge.py).
+# Kept apart from `models:` so a judge's id never appears as an episode's
+# model_id, and so judging cost is never mixed into experiment cost.
+#
+#   - api_model and prices are copied from the `models:` entry with the same
+#     api_model, and carry exactly its sourcing (docs/models.md);
+#     tests/test_grader_judge.py fails if they drift apart.
+#   - context_window_tokens must be set from the vendor's documentation for
+#     that exact api_model before any live judging. It is null until then,
+#     and the judge refuses to run while it is null: the overflow check is
+#     what guarantees a transcript is never cut to fit.
+#   - Exactly one judge is primary: it grades every episode. The others are
+#     run on a subset with `consequence grade --judge-model`.
+#   - The primary judge is an Anthropic model, the same family as two of the
+#     models under test (and the same model as one of them), a known
+#     self-preference risk. The OpenAI judge is the cross-family check. See
+#     docs/judge-methodology.md.
+judges:
+  - id: judge-claude-opus-5
+    provider: anthropic
+    api_model: claude-opus-5
+    input_price_per_million: 5.00
+    output_price_per_million: 25.00
+    context_window_tokens: null
+    primary: true
+
+  - id: judge-gpt-5.1
+    provider: openai
+    api_model: gpt-5.1-2025-11-13
+    input_price_per_million: 1.25
+    output_price_per_million: 10.00
+    context_window_tokens: null

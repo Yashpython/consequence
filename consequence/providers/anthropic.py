@@ -120,6 +120,9 @@ class AnthropicProvider:
     api_key: str | None = None
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_retries: int = 5
+    # None sends no temperature, so the provider's default applies. Set for
+    # judging (consequence.graders.judge), where it is part of the condition.
+    temperature: float | None = None
     _client: Any = field(default=None, init=False, repr=False)
 
     def _get_client(self) -> Any:
@@ -129,19 +132,24 @@ class AnthropicProvider:
             self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
 
-    def run_turn(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> TurnResult:
-        client = self._get_client()
+    def _request(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> dict[str, Any]:
+        """The keyword arguments for messages.create(), built without the SDK."""
         system, anthropic_messages = translate_messages(messages)
-        anthropic_tools = translate_tools(tools)
-
         kwargs: dict[str, Any] = {
             "model": self.api_model,
             "max_tokens": self.max_tokens,
             "messages": anthropic_messages,
-            "tools": anthropic_tools,
+            "tools": translate_tools(tools),
         }
         if system is not None:
             kwargs["system"] = system
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        return kwargs
+
+    def run_turn(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> TurnResult:
+        client = self._get_client()
+        kwargs = self._request(messages, tools)
 
         def _call() -> tuple[Any, int]:
             start = time.monotonic()

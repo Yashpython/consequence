@@ -17,7 +17,7 @@ def test_the_ledger_cites_the_generated_blocks_not_copies():
     """The amendment's rule: numbers that live in another document are cited
     from its marked block, so these keys must actually be used."""
     text = (ROOT / LEDGER_PATH).read_text(encoding="utf-8")
-    for key in ("adversarial.attempted", "adversarial.open",
+    for key in ("adversarial.attempted", "adversarial.structural_limit",
                 "planted.substring_supplier_filter.live", "tests.offline", "tests.live"):
         assert f"<!-- fact:{key} -->" in text, key
 

@@ -117,7 +117,7 @@ def _adversarial_strategies() -> str:
                               re.MULTILINE)))
 
 
-_STRATEGY_COLUMNS = ("attempted", "succeeded_at_baseline", "closed", "open")
+_STRATEGY_COLUMNS = ("attempted", "succeeded_at_baseline", "closed", "structural_limit")
 
 
 def _strategy(strategy: str, column: str) -> Callable[[], str]:
@@ -157,6 +157,8 @@ FACTS: dict[str, Callable[[], str]] = {
     "tools.count": lambda: str(len(__import__("consequence.tools.schema",
                                               fromlist=["TOOLS"]).TOOLS)),
     "models.count": lambda: str(len(_registry())),
+    "judges.count": lambda: str(len(__import__("consequence.providers.registry",
+                                               fromlist=["x"]).load_judge_registry())),
     "providers.count": lambda: str(len(_providers())),
     "tests.offline": lambda: _collected("not live and not smoke"),
     "tests.live": lambda: _collected("live"),
@@ -165,7 +167,8 @@ FACTS: dict[str, Callable[[], str]] = {
     "adversarial.attempted": _adversarial("Adversarial strategies attempted"),
     "adversarial.succeeded_at_baseline": _adversarial("Succeeded against the baseline verifiers"),
     "adversarial.closed": _adversarial("Closed in this pass"),
-    "adversarial.open": _adversarial("Knowingly left open"),
+    "adversarial.structural_limit": _adversarial(
+        "Structural limits of state verification (judge-mitigated)"),
     "adversarial.rejected_from_start": _adversarial("Rejected by the verifiers from the start"),
     "adversarial.strategies": _adversarial_strategies,
 }

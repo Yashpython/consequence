@@ -11,8 +11,10 @@ and is never persisted.
 
 Grading: `grade --grader state_verifier` runs consequence.graders.state, which
 scores every episode with its task's verifier and the collateral check from
-stored data alone -- no environment database, no model calls. llm_judge isn't
-implemented yet; other graders can be supplied through main(graders=...).
+stored data alone -- no environment database, no model calls. `grade --grader
+llm_judge` runs consequence.graders.judge, which reads only each episode's
+transcript and calls the judge model (models.yaml `judges:`); its cost is
+recorded on the gradings rows, never in the experiment's cost.
 """
 
 from __future__ import annotations
@@ -24,10 +26,17 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from consequence.environment import reset, snapshot
+from consequence.graders import judge
 from consequence.graders.state import GRADING_ERROR, GradingIntegrityError, grade_run
 from consequence.harness import DEFAULT_MAX_TURNS, Task, begin_run, run_episode
 from consequence.providers.base import Provider
-from consequence.providers.registry import compute_cost, load_model_registry, make_provider
+from consequence.providers.registry import (
+    compute_cost,
+    load_judge_registry,
+    load_model_registry,
+    make_provider,
+    primary_judge,
+)
 from consequence.results import Results
 from consequence.tasks import TASKS, TASKS_BY_ID, get_task
 
@@ -37,12 +46,7 @@ from consequence.tasks import TASKS, TASKS_BY_ID, get_task
 DRY_RUN_ESTIMATED_INPUT_TOKENS = 8_000
 DRY_RUN_ESTIMATED_OUTPUT_TOKENS = 1_500
 
-GraderFn = Callable[[dict[str, Any], dict[str, Any]], tuple[bool, dict[str, Any]]]
 ProviderFactory = Callable[..., Provider]
-
-# Graders beyond the built-in state grader (e.g. llm_judge, once it exists).
-DEFAULT_GRADERS: dict[str, GraderFn] = {}
-BUILTIN_GRADERS = ("state_verifier",)
 
 ALL_GRADER_NAMES = ("state_verifier", "llm_judge")
 
@@ -98,6 +102,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     grade_parser.add_argument(
         "--regrade", action="store_true", help="Regrade every episode, not just ungraded ones"
+    )
+    grade_parser.add_argument(
+        "--judge-model", default=None,
+        help="Judge id from models.yaml `judges:` (default: the primary judge)",
+    )
+    grade_parser.add_argument(
+        "--judge-temperature", type=float, default=None,
+        help="Judge sampling temperature (default 0)",
+    )
+    grade_parser.add_argument(
+        "--judge-subset", type=int, default=None, metavar="N",
+        help="Judge only N randomly sampled episodes. Non-primary judges only: the primary "
+             "judge must grade exactly the episodes the state verifier grades",
+    )
+    grade_parser.add_argument(
+        "--judge-stability-subset", type=int, default=None, metavar="N",
+        help=f"Re-judge N randomly sampled episodes at temperature "
+             f"{judge.STABILITY_TEMPERATURE}, {judge.VOTES} times each, under grader "
+             f"'{judge.STABILITY_GRADER}'",
+    )
+    grade_parser.add_argument(
+        "--judge-sample-seed", type=int, default=0,
+        help="Seed for --judge-subset / --judge-stability-subset sampling (default 0)",
     )
 
     report_parser = sub.add_parser("report", help="Report on a run")
@@ -290,49 +317,113 @@ def _grade_state(args: argparse.Namespace, results: Results) -> int:
     return len(errors)
 
 
-def _grade_custom(args: argparse.Namespace, results: Results, name: str,
-                  grader_fn: GraderFn) -> None:
-    episodes = (results.episodes_for_run(args.run_id) if args.regrade
-                else results.ungraded_by(name, run_id=args.run_id))
-    for episode in episodes:
-        diff_row = results.state_diff_for_episode(episode["id"])
-        diff_json = (json.loads(diff_row["diff_json"]) if diff_row is not None
-                     else {"added": [], "removed": [], "changed": []})
-        passed, detail = grader_fn(episode, diff_json)
-        results.record_grading(episode["id"], name, passed=passed, detail_json=detail)
-        print(f"graded episode={episode['id']} grader={name} passed={passed}")
-    print(f"totals: graded={len(episodes)}")
+def _judge_setup(args: argparse.Namespace, factory: ProviderFactory) -> dict[str, Any]:
+    """Everything the judge needs, validated before any episode is touched.
+    Any problem here is a CLIError, so a run is never half-judged by a judge
+    that couldn't be set up."""
+    registry = load_judge_registry()
+    if not registry:
+        raise CLIError("models.yaml has no judges: section")
+    model = args.judge_model or primary_judge(registry).id
+    spec = registry.get(model)
+    if spec is None:
+        raise CLIError(f"no judge {model!r} in models.yaml; judges: {sorted(registry)}")
+    stability = args.judge_stability_subset is not None
+    if stability and args.judge_temperature is not None:
+        raise CLIError(f"--judge-stability-subset always runs at temperature "
+                       f"{judge.STABILITY_TEMPERATURE}; drop --judge-temperature")
+    if stability and args.judge_subset is not None:
+        raise CLIError("use either --judge-subset or --judge-stability-subset, not both")
+    if args.judge_subset is not None and spec.primary:
+        raise CLIError(f"--judge-subset is for second judges only: the primary judge "
+                       f"({spec.id}) grades every episode, so its verdicts and the state "
+                       "verifier's cover the same episodes")
+    temperature = (judge.STABILITY_TEMPERATURE if stability
+                   else args.judge_temperature if args.judge_temperature is not None else 0.0)
+    try:
+        judge.check_config(spec)
+        provider = factory(spec.id, registry=registry, temperature=temperature)
+    except (judge.JudgeConfigError, KeyError, ImportError, ValueError) as exc:
+        raise CLIError(f"the judge can't run, so nothing was graded: {exc}") from exc
+    return {"spec": spec, "provider": provider, "temperature": temperature,
+            "grader": judge.STABILITY_GRADER if stability else judge.JUDGE_GRADER,
+            "subset": args.judge_stability_subset if stability else args.judge_subset}
 
 
-def cmd_grade(args: argparse.Namespace, graders: Mapping[str, GraderFn]) -> int:
+def _grade_judge(args: argparse.Namespace, results: Results, setup: dict[str, Any]) -> int:
+    """Judge the run and print the results. Returns the number of judge errors."""
+    spec, grader = setup["spec"], setup["grader"]
+    episode_ids, detail = None, {}
+    if setup["subset"] is not None:
+        try:
+            episode_ids = judge.sample_episodes(results, args.run_id, setup["subset"],
+                                                args.judge_sample_seed)
+        except ValueError as exc:
+            raise CLIError(str(exc)) from exc
+        detail = {"sample_seed": args.judge_sample_seed, "sample_size": setup["subset"]}
+    summary = judge.grade_run_with_judge(
+        args.run_id, results, setup["provider"], spec, grader=grader,
+        temperature=setup["temperature"], episode_ids=episode_ids, regrade=args.regrade,
+        detail=detail,
+    )
+    for g in summary.graded:
+        if g.status == judge.JUDGE_ERROR:
+            print(f"JUDGE ERROR episode={g.episode_id} task={g.task_id} ({g.error_reason})")
+        else:
+            print(f"judged episode={g.episode_id} task={g.task_id} status={g.episode_status} "
+                  f"{grader}={'pass' if g.passed else 'FAIL'} "
+                  f"behaviour={g.behaviour or 'no_majority'} agreement={g.agreement:.2f}")
+    if summary.already_graded:
+        print(f"skipped {len(summary.already_graded)} already-judged episode(s); "
+              "pass --regrade to re-judge them")
+    counts = summary.pass_counts()
+    rates = " | ".join(f"{c} {counts[c]['passed']}/{counts[c]['total']} passed"
+                       for c in CATEGORY_ORDER if c in counts)
+    print(f"totals: {grader} [{spec.id}, temperature {setup['temperature']}] "
+          f"{rates or 'none judged'}")
+    for category, behaviours in summary.behaviour_counts().items():
+        print(f"behaviour ({category}): "
+              + ", ".join(f"{b} {n}" for b, n in sorted(behaviours.items())))
+    cost = summary.cost_usd()
+    print("judging cost (not part of the experiment's cost): "
+          + ("unknown" if cost is None else f"${cost:.4f}"))
+    errors = summary.judge_errors()
+    if errors:
+        print("judge errors, excluded from the totals above: "
+              + ", ".join(f"{reason} {n}" for reason, n in sorted(errors.items())))
+    return sum(errors.values())
+
+
+def cmd_grade(args: argparse.Namespace, judge_provider_factory: ProviderFactory) -> int:
     requested = set(ALL_GRADER_NAMES) if args.grader == "all" else {args.grader}
-    available = set(BUILTIN_GRADERS) | set(graders)
-    missing = requested - available
+    judge_flags = (args.judge_model, args.judge_temperature, args.judge_subset,
+                   args.judge_stability_subset)
+    if "llm_judge" not in requested and any(f is not None for f in judge_flags):
+        raise CLIError("--judge-* options apply only to --grader llm_judge or all")
     # Fail closed, like every other integrity path: if any requested grader
-    # can't run, run none of them. `--grader all` that quietly ran a subset
-    # would report a partial grading as a complete one.
-    if missing:
-        raise CLIError(f"grader(s) not implemented yet, so nothing was graded: "
-                       f"{', '.join(sorted(missing))}. available: {sorted(available)}")
+    # can't run, run none of them. Set the judge up before grading anything.
+    setup = _judge_setup(args, judge_provider_factory) if "llm_judge" in requested else None
 
     results = Results(args.results_db)
     try:
         if results.get_run(args.run_id) is None:
             raise CLIError(f"no run {args.run_id}")
-        grading_errors = 0
-        for name in sorted(requested):
-            if name == "state_verifier":
-                try:
-                    grading_errors += _grade_state(args, results)
-                except GradingIntegrityError as exc:
-                    raise CLIError(f"grading stopped, nothing written: {exc}") from exc
-            else:
-                _grade_custom(args, results, name, graders[name])
-        if grading_errors:
+        errors = 0
+        if "state_verifier" in requested:  # first: free, and stops on bad stored state
+            try:
+                errors += _grade_state(args, results)
+            except GradingIntegrityError as exc:
+                raise CLIError(f"grading stopped, nothing written: {exc}") from exc
+        if setup is not None:
+            try:
+                errors += _grade_judge(args, results, setup)
+            except judge.JudgeConfigError as exc:
+                raise CLIError(str(exc)) from exc
+        if errors:
             # Every other episode is graded and recorded; the exit code says
             # the grading isn't complete.
-            print(f"error: {grading_errors} episode(s) could not be graded (grading_error)",
-                  file=sys.stderr)
+            print(f"error: {errors} grading(s) have no verdict "
+                  "(grading_error / judge_error)", file=sys.stderr)
             return 1
         return 0
     finally:
@@ -374,17 +465,21 @@ def build_report(results: Results, run_id: int) -> dict[str, Any]:
         total_turns += e["turn_count"] or 0
 
     # grader -> category -> {"passed", "total"}; deliberately no cross-category sum.
-    # Only rows with a verdict count. A grading error is neither a pass nor a
-    # fail, so it is counted on its own, never folded into a total.
+    # A judge's rows are keyed "grader:judge_model", so two judges are never
+    # blended either. Only rows with a verdict count: a grading_error or a
+    # judge_error is neither a pass nor a fail, so it is counted on its own.
     grading: dict[str, dict[str, dict[str, int]]] = {}
     grading_errors: dict[str, int] = {}
+    judge_cost = 0.0
     for e in episodes:
         category = task_category(e["task_id"])
         for g in results.gradings_for_episode(e["id"]):
-            if g["status"] == GRADING_ERROR:
-                grading_errors[g["grader"]] = grading_errors.get(g["grader"], 0) + 1
+            key = f"{g['grader']}:{g['judge_model']}" if g["judge_model"] else g["grader"]
+            judge_cost += g["judge_cost_usd"] or 0.0
+            if g["status"] != "graded":
+                grading_errors[key] = grading_errors.get(key, 0) + 1
                 continue
-            bucket = grading.setdefault(g["grader"], {}).setdefault(
+            bucket = grading.setdefault(key, {}).setdefault(
                 category, {"passed": 0, "total": 0}
             )
             bucket["total"] += 1
@@ -396,7 +491,8 @@ def build_report(results: Results, run_id: int) -> dict[str, Any]:
         "finished_at": run["finished_at"],
         "episode_count": len(episodes),
         "by_status": by_status,
-        "total_cost_usd": total_cost,
+        "total_cost_usd": total_cost,  # the episodes' cost only, never judging
+        "judge_cost_usd": judge_cost,
         "total_turns": total_turns,
         "grading": grading,
         "grading_errors": grading_errors,
@@ -411,6 +507,7 @@ def render_report_md(report: dict[str, Any]) -> str:
         f"- episodes: {report['episode_count']}",
         f"- status breakdown: {report['by_status']}",
         f"- total cost: {_format_cost(report['total_cost_usd'])}",
+        f"- judging cost (separate): {_format_cost(report['judge_cost_usd'])}",
         f"- total turns: {report['total_turns']}",
     ]
     if not report["grading"]:
@@ -427,7 +524,8 @@ def render_report_md(report: dict[str, Any]) -> str:
         ]
         lines.append(f"    {grader_name}: {' | '.join(parts)}")
     for grader_name, count in report["grading_errors"].items():
-        lines.append(f"    {grader_name}: {count} grading error(s), no verdict, not counted above")
+        lines.append(f"    {grader_name}: {count} without a verdict (grading or judge error), "
+                     "not counted above")
     return "\n".join(lines)
 
 
@@ -470,9 +568,8 @@ def main(
     argv: list[str] | None = None,
     *,
     provider_factory: ProviderFactory = make_provider,
-    graders: Mapping[str, GraderFn] | None = None,
+    judge_provider_factory: ProviderFactory = make_provider,
 ) -> int:
-    graders = DEFAULT_GRADERS if graders is None else graders
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -484,7 +581,7 @@ def main(
         if args.command == "run":
             return cmd_run(args, provider_factory)
         if args.command == "grade":
-            return cmd_grade(args, graders)
+            return cmd_grade(args, judge_provider_factory)
         if args.command == "report":
             return cmd_report(args)
         if args.command == "status":

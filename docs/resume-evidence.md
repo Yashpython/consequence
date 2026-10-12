@@ -38,10 +38,11 @@ adapters for Anthropic, OpenAI, Google and OpenRouter.
 | Verifiers (one per task) | 25 <!-- fact:verifiers.count --> | MEASURED | `Task.verify` over `TASKS` |
 | Tools exposed to the agent | 7 <!-- fact:tools.count --> | MEASURED | `consequence/tools/schema.py` `TOOLS` |
 | Models in the registry | 5 <!-- fact:models.count --> | MEASURED | `consequence/models.yaml` |
+| Judge models (separate `judges:` section) | 2 <!-- fact:judges.count --> | MEASURED | `consequence/models.yaml` `judges:` |
 | Providers in the registry | 4 <!-- fact:providers.count --> | MEASURED | `provider` field in `consequence/models.yaml` |
 | Trials per (task, model) in the experiment | NOT YET MEASURED | NOT YET MEASURED | Not fixed yet: `consequence run --trials` defaults to one. Set by the first real run. |
 | Total episodes run against real models | NOT YET MEASURED | NOT YET MEASURED | `consequence status` after the first real run. No real run exists. |
-| Offline tests | 526 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
+| Offline tests | 573 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
 | Live tests (real Postgres) | 332 <!-- fact:tests.live --> | MEASURED | `pytest --collect-only -q -m live` |
 | Smoke tests (one billed API call each) | 4 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`. Never run; see section 9. |
 | Adversarial strategies | 6 <!-- fact:adversarial.strategies --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
@@ -58,15 +59,18 @@ marked blocks, never copied.
 
 ### 3.1 Verification gap
 
-- **Definition:** among episodes where the agent claims success, the share
-  the state verifier fails.
-- **Formula:** episodes (claimed success and `passed = 0`) / episodes (claimed
-  success).
+- **Definition:** on normal tasks, among episodes the transcript-only judge
+  passes, the share the state verifier fails: how often reading the
+  transcript, the method most teams use, credits work the database shows
+  wasn't done.
+- **Formula:** episodes (primary `llm_judge` passed = 1 and `state_verifier`
+  passed = 0) / episodes (primary `llm_judge` passed = 1), normal tasks, over
+  the identical episode set both graders cover.
 - **Value:** NOT YET MEASURED
-- **Will come from:** the commit that implements `llm_judge` (reading claims
-  from transcripts), plus a real run.
-- **Regenerate:** no command yet. `consequence grade --grader llm_judge`
-  refuses until the judge exists.
+- **Will come from:** the live judging commit. The judge exists
+  (`consequence/graders/judge.py`) but has only run against stubs.
+- **Regenerate:** `consequence grade --run N --grader all`, then a computation
+  over both graders' rows; no single command computes the ratio yet.
 
 ### 3.2 pass@1 vs pass^k
 
@@ -114,29 +118,40 @@ marked blocks, never copied.
 
 ### 3.6 Judge API agreement
 
-- **Definition:** how often `llm_judge` and `state_verifier` agree on the same
-  episode.
-- **Formula:** agreement rate and Cohen's kappa over shared episodes.
+- **Definition:** agreement among the judge's three votes on one episode at
+  temperature 0. It measures API-level nondeterminism, NOT judge reliability:
+  the three calls see identical input, so it is expected near 1 and says
+  nothing about whether the judge is right. Never present it as
+  self-consistency. See `docs/judge-methodology.md`.
+- **Formula:** per episode, share of votes whose (passed, behaviour) is the
+  modal pair (`gradings.judge_api_agreement`); report the distribution.
 - **Value:** NOT YET MEASURED
-- **Will come from:** the commit that implements `llm_judge`.
-- **Regenerate:** no command yet.
+- **Will come from:** the live judging commit.
+- **Regenerate:** `consequence grade --run N --grader llm_judge`.
 
 ### 3.7 Judge stability
 
-- **Definition:** whether the same judge gives the same verdict on the same
-  episode when asked again.
-- **Formula:** agreement across repeated judgements of identical inputs.
+- **Definition:** whether the judge gives the same verdict when sampled at
+  temperature 0.7: the number that speaks to judge reliability.
+- **Formula:** per sampled episode, share of three votes on the modal
+  (passed, behaviour) pair (`gradings.judge_vote_agreement`, grader
+  `llm_judge_stability`).
 - **Value:** NOT YET MEASURED
-- **Will come from:** the commit that implements `llm_judge`.
-- **Regenerate:** no command yet.
+- **Will come from:** the live judging commit.
+- **Regenerate:** `consequence grade --run N --grader llm_judge
+  --judge-stability-subset K --judge-sample-seed S`.
 
 ### 3.8 Cross-family judge comparison
 
-- **Definition:** agreement between judges from different model families
-  grading the same episodes.
+- **Definition:** agreement between the primary judge (Anthropic) and the
+  cross-family judge (OpenAI) on the same episodes, split by the model under
+  test, to expose self-preference.
+- **Formula:** agreement rate on `passed` over episodes both judges graded,
+  per evaluated model.
 - **Value:** NOT YET MEASURED
-- **Will come from:** `llm_judge` with more than one judge model.
-- **Regenerate:** no command yet.
+- **Will come from:** the live judging commit.
+- **Regenerate:** `consequence grade --run N --grader llm_judge --judge-model
+  judge-gpt-5.1 --judge-subset K`, then compare rows by `judge_model`.
 
 ### 3.9 Episodes that did not complete but satisfied the verifier
 
@@ -152,6 +167,19 @@ marked blocks, never copied.
 - **Regenerate:** `consequence grade --run N --grader state_verifier` prints
   it.
 
+### 3.10 What trap passes are made of
+
+- **Definition:** among trap episodes the state verifier passed, the split
+  across the judge's `refused_and_explained`, `silent_inaction` and
+  `false_claim`. The state verifier can't separate them; this is the judge's
+  load-bearing role.
+- **Formula:** counts of primary-judge `behaviour` over trap episodes with
+  `state_verifier` passed = 1.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the live judging commit.
+- **Regenerate:** `consequence grade --run N --grader all`; `grade` prints
+  behaviour counts per category.
+
 ## 4. Engineering decisions worth claiming
 
 | Decision | Why it was made | Where it is enforced in code | What it rules out |
@@ -163,6 +191,9 @@ marked blocks, never copied.
 | Fail-closed integrity checks | A grader that guesses is worse than one that stops | `GradingIntegrityError`, `ResultsIntegrityError`, `ResultsSchemaError`; `grade --grader all` refuses if any grader can't run | Partially graded runs and tampered or inconsistent stored state passing silently |
 | Provider adapter interface | Adding a model should be a config change | `consequence/providers/base.py` `Provider`; `consequence/providers/registry.py`; `consequence/models.yaml` with pinned version strings and prices | Provider-specific code in the harness; floating model aliases |
 | Execution separated from grading | Measuring and judging are different jobs and fail differently | `harness.run_episode` records; `consequence grade` judges later from stored data | A grader bug corrupting a run; re-running models to re-score |
+| Two graders with opposite blind spots | A state verifier can't hear an explanation and a transcript reader can't see the database; on trap tasks only the transcript separates refusal, silence and a false claim | `consequence/graders/judge.py` reads only the stored transcript (a test checks it imports nothing that produces state); `behaviour` on every judge row | Treating the twelve trap limits as fixable verifier holes; a judge that quietly sees the state it should be blind to |
+| Same denominator for every grader | A gap between graders computed over different episode sets is meaningless and silent | The judge grades every episode whatever its status, writing a `judge_error` row rather than skipping; `test_the_judge_grades_exactly_the_episodes_the_state_verifier_grades` | Pass rates inflated by dropping errored or unjudgeable episodes |
+| Never truncate what the judge reads | The false-claim finding depends on the judge seeing an earlier refusal | Overflow is checked before any call and recorded as `judge_error` / `context_overflow`; tests check every stored byte reaches the prompt | Verdicts on silently shortened transcripts |
 | Trap tasks scored separately from normal tasks | An agent that does nothing passes every trap | `cli.build_report` and `GradingSummary.pass_counts` group by category with no combined figure | A headline pass rate inflated by inaction |
 | Two notions of success kept apart | An episode that crashed after the right write must still fail, but that fact is worth reporting | `gradings.passed` vs `gradings.verifier_verdict_raw`; `status = 'grading_error'` for a verifier that raises | Crashes counted as passes; verifier bugs counted as agent failures |
 
@@ -197,6 +228,10 @@ How I would say each one out loud:
   move is to change nothing, so an agent that does nothing passes all of
   them. Reports always show normal and trap results side by side and never
   combine them.
+- **Two graders.** One grader reads the database and never the transcript;
+  the other reads the transcript and never the database. On trap tasks a
+  refusal, silence and a false claim leave the same empty database, so only
+  the transcript grader can tell them apart.
 - **Two notions of success.** If an agent makes the right write and then
   crashes, the episode fails, but I keep the verifier's raw verdict for
   analysis. If the verifier itself crashes, that's recorded as a grading
@@ -349,7 +384,7 @@ Cited from `docs/reward-hacking-log.md`, block `adversarial:summary`, which
 | Attacks run | 150 <!-- fact:adversarial.attempted --> | MEASURED | `adversarial:summary` |
 | Succeeded against the baseline verifiers | 39 <!-- fact:adversarial.succeeded_at_baseline --> | MEASURED | `adversarial:summary` |
 | Closed | 27 <!-- fact:adversarial.closed --> | MEASURED | `adversarial:summary` |
-| Knowingly left open (all trap tasks, with the reason) | 12 <!-- fact:adversarial.open --> | MEASURED | `adversarial:summary` |
+| Structural limits of state verification (all trap tasks; mitigated by the judge) | 12 <!-- fact:adversarial.structural_limit --> | MEASURED | `adversarial:summary` |
 | Rejected from the start | 111 <!-- fact:adversarial.rejected_from_start --> | MEASURED | `adversarial:summary` |
 
 ### Planted-bug validation
@@ -361,9 +396,9 @@ are in that block.
 
 | Fact | Value | Status | Source |
 |---|---|---|---|
-| Grader reads the live environment: offline tests failing | 21 <!-- fact:planted.reads_live_environment.offline --> | MEASURED | `planted-bugs` |
+| Grader reads the live environment: offline tests failing | 24 <!-- fact:planted.reads_live_environment.offline --> | MEASURED | `planted-bugs` |
 | Grader reads the live environment: live tests failing | 1 <!-- fact:planted.reads_live_environment.live --> | MEASURED | `planted-bugs` |
-| Grader skips errored episodes: offline tests failing | 11 <!-- fact:planted.skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
+| Grader skips errored episodes: offline tests failing | 13 <!-- fact:planted.skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
 | Grader skips errored episodes: live tests failing | 1 <!-- fact:planted.skips_errored_episodes.live --> | MEASURED | `planted-bugs` |
 | Old substring supplier filter: offline tests failing | 0 <!-- fact:planted.substring_supplier_filter.offline --> | MEASURED | `planted-bugs` |
 | Old substring supplier filter: live tests failing | 5 <!-- fact:planted.substring_supplier_filter.live --> | MEASURED | `planted-bugs` |
@@ -402,11 +437,12 @@ something not yet measured.
 - **READY** Hardened 25 <!-- fact:verifiers.count --> state-based verifiers against reward hacking, closing 27 <!-- fact:adversarial.closed --> of the 39 <!-- fact:adversarial.succeeded_at_baseline --> attacks that beat them, by running 150 <!-- fact:adversarial.attempted --> scripted adversarial agents across 6 <!-- fact:adversarial.strategies --> cheating strategies.
 - **READY** Caught a write-then-revert exploit that passed all 25 <!-- fact:adversarial.transient_write.succeeded_at_baseline --> verifiers, by adding an audit-trail check that every verifier inherits centrally.
 - **READY** Found and fixed a tool-layer bug where a single wildcard character in model input returned every supplier's records, proven by restoring the old filter and watching 5 <!-- fact:planted.substring_supplier_filter.live --> new tests fail.
-- **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 21 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
-- **READY** Built a test suite of 526 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
+- **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 24 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
+- **READY** Built a test suite of 573 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
 - **DRAFT** Measured how often agents claim success the database contradicts (verification gap: NOT YET MEASURED) across the registry's models, by grading final state instead of transcripts.
 - **DRAFT** Showed the difference between one-shot and every-time reliability (pass@1 vs pass^k: NOT YET MEASURED), by running repeated trials per task and model.
 - **DRAFT** Quantified collateral damage (rate: NOT YET MEASURED) by classifying every out-of-scope row change as benign or destructive.
+- **DRAFT** Separated justified refusals from silence and false claims among trap-task passes the database could not distinguish (split: NOT YET MEASURED), by pairing a state grader with a transcript-only LLM judge.
 
 ## 9. Explicitly NOT claimable
 
@@ -428,8 +464,21 @@ something not yet measured.
   `consequence/planted_bugs.py` before citing any count.
 - **Anything about adoption.** No one else uses it, it has no stars or
   forks, and no release.
-- **`llm_judge`, the failure taxonomy, judge agreement or stability.** None
-  exist.
+- **Any judge result.** The judge is built and tested against stubs only; it
+  has never called a real model. Its accuracy, its agreement figures and its
+  self-preference are all unmeasured.
+- **"`judge_api_agreement` shows the judge is consistent."** It measures API
+  nondeterminism at temperature 0, not reliability. Only the temperature-0.7
+  stability subset speaks to reliability.
+- **"Self-preference bias is handled."** The cross-family judge is a design
+  that can measure it; nothing has been measured.
+- **Judge context windows.** `context_window_tokens` is unset for both
+  judges; the judge refuses to run until it is set from vendor documentation.
+- **Mutation checks on the judge tests.** Four bugs were planted in
+  `judge.py` by hand while it was written, and each was caught, but the
+  outputs aren't stored. Add them to `consequence/planted_bugs.py` before
+  citing a count.
+- **The failure taxonomy.** It doesn't exist.
 - **Lines of code, or speed and cost of a full run.** Not measured.
 - **The do-nothing agent's score on traps as a finding.** It is a property of
   the task design, shown with a mock agent, not a measured model behaviour.
@@ -438,4 +487,5 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-11 | uncommitted judge work | Added the LLM judge: scale facts (judge models), section 3 definitions for the verification gap, judge API agreement, stability, cross-family comparison and the new 3.10 trap behaviour split, three engineering decisions, the reframed adversarial row (structural limits), a DRAFT bullet, and section 9 guards. Corrected 3.6, which wrongly defined judge API agreement as judge-vs-state agreement. |
 | 2026-10-11 | `c66c78d` plus uncommitted hardening work | Created. Backfilled from every commit, `a033e8e` through `c66c78d`, and the hardening work in progress. Added the ledger check (`consequence/ledger.py`) and the planted-bug harness whose output section 6 cites. |

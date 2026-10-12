@@ -45,6 +45,44 @@ def load_model_registry(path: str | Path = MODELS_YAML_PATH) -> dict[str, ModelS
     return specs
 
 
+@dataclass(frozen=True)
+class JudgeSpec(ModelSpec):
+    """A model used to grade transcripts (models.yaml `judges:`), kept apart
+    from the models under test so a judge id never appears as an episode's
+    model_id. context_window_tokens is None until it is set from the
+    vendor's documentation; the judge refuses to run without it, because
+    checking for context overflow is what stops a transcript being cut."""
+
+    context_window_tokens: int | None = None
+    primary: bool = False
+
+
+def load_judge_registry(path: str | Path = MODELS_YAML_PATH) -> dict[str, JudgeSpec]:
+    """Parse the `judges:` section into {id: JudgeSpec}. Exactly one judge is
+    primary: the one every episode is graded by."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    specs: dict[str, JudgeSpec] = {}
+    for entry in raw.get("judges", []):
+        spec = JudgeSpec(
+            id=entry["id"],
+            provider=entry["provider"],
+            api_model=entry["api_model"],
+            input_price_per_million=float(entry["input_price_per_million"]),
+            output_price_per_million=float(entry["output_price_per_million"]),
+            context_window_tokens=entry.get("context_window_tokens"),
+            primary=bool(entry.get("primary", False)),
+        )
+        specs[spec.id] = spec
+    primaries = [s.id for s in specs.values() if s.primary]
+    if specs and len(primaries) != 1:
+        raise ValueError(f"models.yaml judges: exactly one must be primary, found {primaries}")
+    return specs
+
+
+def primary_judge(registry: dict[str, JudgeSpec]) -> JudgeSpec:
+    return next(s for s in registry.values() if s.primary)
+
+
 def compute_cost(
     model_id: str,
     input_tokens: int,
