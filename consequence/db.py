@@ -24,13 +24,24 @@ def _dsn() -> str:
     return dsn
 
 
+# Every connection's session time zone is pinned to UTC. Every timestamp
+# column is timestamptz, and the session zone decides both how a literal
+# without an offset is read and how a value is rendered. snapshot() converts
+# to UTC anyway, but nothing that touches the environment should depend on
+# the server's default zone -- CI's postgres and a dev box needn't agree.
+# Passed as a libpq option, so it applies from the first statement and
+# survives a rollback (a SET inside a transaction would not).
+SESSION_TIMEZONE = "UTC"
+
+
 @contextmanager
 def connect() -> Iterator[psycopg.Connection]:
-    """Yield a psycopg3 connection built from DATABASE_URL.
+    """Yield a psycopg3 connection built from DATABASE_URL, session time zone
+    pinned to UTC.
 
     Commits on clean exit, rolls back on exception, always closes.
     """
-    with psycopg.connect(_dsn()) as conn:
+    with psycopg.connect(_dsn(), options=f"-c TimeZone={SESSION_TIMEZONE}") as conn:
         yield conn
 
 

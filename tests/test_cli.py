@@ -119,6 +119,38 @@ def test_grade_unimplemented_grader_is_a_clean_error(db_path, capsys):
         assert results.episodes_needing_grading(run_id=run_id) != []
 
 
+def test_grade_all_fails_closed_when_a_registered_grader_cannot_run(db_path, capsys):
+    """llm_judge is registered but not implemented. --grader all must refuse
+    and name it -- not quietly run state_verifier alone and exit 0, which
+    would pass off a partial grading as a complete one."""
+    run_id, _, _ = _seed_two_episodes(db_path)
+    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "all"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "llm_judge" in err and "nothing was graded" in err
+
+    with Results(db_path) as results:  # fail closed: not even the graders that could run
+        assert results._conn.execute("SELECT COUNT(*) FROM gradings").fetchone()[0] == 0
+
+
+def test_grade_all_runs_every_registered_grader_when_all_are_available(db_path, capsys,
+                                                                        monkeypatch):
+    run_id, changed_ep, _ = _seed_two_episodes(db_path)
+    ran = []
+
+    def fake_state(args, results):
+        ran.append("state_verifier")
+        return 0  # no grading errors
+
+    monkeypatch.setattr("consequence.cli._grade_state", fake_state)
+    rc = main(["--results-db", db_path, "grade", "--run", str(run_id), "--grader", "all"],
+              graders={"llm_judge": _trivial_verifier})
+    assert rc == 0
+    assert ran == ["state_verifier"]
+    with Results(db_path) as results:
+        assert [g["grader"] for g in results.gradings_for_episode(changed_ep)] == ["llm_judge"]
+
+
 def test_grade_records_one_row_per_episode(db_path, capsys):
     run_id, changed_ep, noop_ep = _seed_two_episodes(db_path)
 

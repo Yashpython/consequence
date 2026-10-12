@@ -124,6 +124,48 @@ def test_round_trip_gradings(results):
     ).fetchone()
     assert row["passed"] == 1
     assert json.loads(row["detail_json"]) == {"reason": "flag set"}
+    assert (row["status"], row["verifier_verdict_raw"], row["error_traceback"]) == (
+        "graded", None, None)
+
+
+def test_passed_and_the_raw_verifier_verdict_are_separate_columns(results):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id, status="error")
+    results.record_grading(episode_id, "state_verifier", passed=False,
+                           verifier_verdict_raw=True)
+    [row] = results.gradings_for_episode(episode_id)
+    assert (row["passed"], row["verifier_verdict_raw"]) == (0, 1)
+
+
+def test_grading_error_has_no_verdict_and_keeps_the_traceback(results):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    results.record_grading(episode_id, "state_verifier", passed=True)
+    results.record_grading_error(episode_id, "state_verifier", "Traceback ...\nKeyError: 'x'")
+
+    [row] = results.gradings_for_episode(episode_id)  # replaced, not appended
+    assert row["status"] == "grading_error"
+    assert row["passed"] is None and row["verifier_verdict_raw"] is None
+    assert row["error_traceback"].endswith("KeyError: 'x'")
+
+    results.record_grading(episode_id, "state_verifier", passed=True)  # retried, fixed
+    [row] = results.gradings_for_episode(episode_id)
+    assert (row["status"], row["passed"], row["error_traceback"]) == ("graded", 1, None)
+
+
+@pytest.mark.parametrize("status, passed, traceback_text", [
+    ("graded", None, None),               # a verdict row must have a verdict
+    ("grading_error", 0, "Traceback"),    # an error row can't also be a failure
+    ("grading_error", None, None),        # an error row must keep its traceback
+    ("graded", 1, "Traceback"),           # a verdict row has no traceback
+])
+def test_gradings_constraints_keep_verdicts_and_errors_apart(results, status, passed,
+                                                             traceback_text):
+    run_id = seed_run(results)
+    episode_id = _make_episode(results, run_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        results._upsert_grading(episode_id, "state_verifier", status, passed, None,
+                                traceback_text, None, None)
 
 
 def test_regrading_is_idempotent_and_replaces(results):

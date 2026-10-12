@@ -36,7 +36,7 @@ DEFAULT_DB_PATH = "results/results.db"
 # Bump on any schema change. A results.db with a different version is refused
 # outright. There are no migrations: no real runs exist yet, so the remedy is
 # to delete the file and re-run.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class ResultsSchemaError(RuntimeError):
@@ -120,15 +120,32 @@ CREATE TABLE IF NOT EXISTS state_diffs (
 -- the task's scope were touched" (see consequence/collateral.py). A given
 -- (episode_id, grader) pair is unique: re-grading replaces the prior verdict
 -- rather than appending a new one, so offline re-scoring is safe to re-run.
+--
+-- Two notions of success, kept in separate columns so later code can't mix
+-- them up:
+--   passed               the authoritative result. Every metric uses this and
+--                        only this. An episode that didn't complete is never
+--                        passed, whatever state it left.
+--   verifier_verdict_raw what the task's verifier said about the final state,
+--                        before the completion rule. Analysis only, never
+--                        aggregated into a pass rate. NULL for graders that
+--                        have no separate verifier verdict.
+-- status 'grading_error' means the grader itself raised: there is no verdict
+-- (passed is NULL, the traceback is stored). It is neither a pass nor a fail.
 CREATE TABLE IF NOT EXISTS gradings (
-    id          INTEGER PRIMARY KEY,
-    episode_id  INTEGER NOT NULL REFERENCES episodes (id),
-    grader      TEXT NOT NULL
-                CHECK (grader IN ('state_verifier', 'llm_judge', 'collateral')),
-    passed      INTEGER NOT NULL CHECK (passed IN (0, 1)),
-    detail_json TEXT,
-    graded_at   TEXT NOT NULL,
-    UNIQUE (episode_id, grader)
+    id                   INTEGER PRIMARY KEY,
+    episode_id           INTEGER NOT NULL REFERENCES episodes (id),
+    grader               TEXT NOT NULL
+                         CHECK (grader IN ('state_verifier', 'llm_judge', 'collateral')),
+    status               TEXT NOT NULL CHECK (status IN ('graded', 'grading_error')),
+    passed               INTEGER CHECK (passed IN (0, 1)),
+    verifier_verdict_raw INTEGER CHECK (verifier_verdict_raw IN (0, 1)),
+    error_traceback      TEXT,
+    detail_json          TEXT,
+    graded_at            TEXT NOT NULL,
+    UNIQUE (episode_id, grader),
+    CHECK ((status = 'graded') = (passed IS NOT NULL)),
+    CHECK ((status = 'grading_error') = (error_traceback IS NOT NULL))
 );
 """
 
@@ -403,6 +420,8 @@ class Results:
         passed: bool,
         detail_json: Any = None,
         graded_at: str | None = None,
+        *,
+        verifier_verdict_raw: bool | None = None,
     ) -> int:
         """Insert or replace the verdict for (episode_id, grader).
 
@@ -410,17 +429,43 @@ class Results:
         row's values rather than appending a new one, so an offline
         re-scoring pass is safe to run as many times as needed.
         """
+        raw = None if verifier_verdict_raw is None else int(verifier_verdict_raw)
+        return self._upsert_grading(episode_id, grader, "graded", int(passed), raw, None,
+                                    detail_json, graded_at)
+
+    def record_grading_error(
+        self,
+        episode_id: int,
+        grader: str,
+        error_traceback: str,
+        detail_json: Any = None,
+        graded_at: str | None = None,
+    ) -> int:
+        """Record that the grader raised on this episode: no verdict, so
+        passed is NULL -- not a failure -- and the traceback is kept.
+        Replaces any prior row for (episode_id, grader), like record_grading."""
+        return self._upsert_grading(episode_id, grader, "grading_error", None, None,
+                                    error_traceback, detail_json, graded_at)
+
+    def _upsert_grading(self, episode_id: int, grader: str, status: str, passed: int | None,
+                        verifier_verdict_raw: int | None, error_traceback: str | None,
+                        detail_json: Any, graded_at: str | None) -> int:
         with self._conn:
             self._conn.execute(
                 """
-                INSERT INTO gradings (episode_id, grader, passed, detail_json, graded_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO gradings (episode_id, grader, status, passed, verifier_verdict_raw,
+                                      error_traceback, detail_json, graded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (episode_id, grader) DO UPDATE SET
+                    status = excluded.status,
                     passed = excluded.passed,
+                    verifier_verdict_raw = excluded.verifier_verdict_raw,
+                    error_traceback = excluded.error_traceback,
                     detail_json = excluded.detail_json,
                     graded_at = excluded.graded_at
                 """,
-                (episode_id, grader, int(passed), _json(detail_json), graded_at or _now()),
+                (episode_id, grader, status, passed, verifier_verdict_raw, error_traceback,
+                 _json(detail_json), graded_at or _now()),
             )
         row = self._conn.execute(
             "SELECT id FROM gradings WHERE episode_id = ? AND grader = ?",

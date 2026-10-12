@@ -85,10 +85,80 @@ verifier is wrong, so fix the verifier, never weaken the adversary.
   are graded `passed=False` with the reason recorded, never skipped.
   `tests/test_grader_state.py` grades a run with `env/` deleted from disk;
   `tests/test_results.py` covers each write-time rejection.
+- **Counting the verifier's raw verdict as a pass.** An episode that errored
+  after making the right write leaves a state the verifier accepts. The
+  gradings row keeps that as `verifier_verdict_raw`, for analysis, next to
+  the authoritative `passed`, which is 0 for any episode that didn't
+  complete. Code that read the raw verdict as the result would turn crashes
+  into passes. **Closed:** they are separate columns with unambiguous names,
+  and every pass count reads `passed` only.
+  `test_no_public_grading_function_returns_the_raw_verdict_as_a_pass_result`
+  parses `consequence/graders/state.py` and fails if any public function
+  outside an explicit analysis-only list reads `verifier_verdict_raw`.
+  `test_the_raw_verdict_never_reaches_a_pass_count` checks the same episode
+  through the summary and the CLI report. The count of such episodes is
+  reported on its own (`GradingSummary.incomplete_but_verifier_satisfied`),
+  never added to a pass rate.
+- **A verifier that raises.** A bug in a verifier can't be allowed to decide
+  the outcome either way. If the exception were scored as a failure, the
+  agent's pass rate would silently drop. If it crashed grading, one bad task
+  would hide every other result. **Closed:** that episode's rows are recorded
+  as `status='grading_error'` with the traceback and `passed=NULL`. Those rows
+  are excluded from every pass count and reported separately, `consequence
+  grade` exits non-zero, and the next `grade` retries them once the verifier
+  is fixed. The rest of the run is graded normally.
+  `test_a_raising_verifier_is_recorded_as_a_grading_error` plants a verifier
+  that raises.
 - **Writing outside the tool layer.** Not possible. The model never sees SQL
   (standing rule 4), so every change goes through `consequence.tools`, which
   enforces its own business rules and writes the audit row. **Closed**
   (structural).
+
+## Tool layer: model input changed query semantics (supplier_name filter)
+
+Not a verifier hole, but a break in the premise every verifier relies on. The
+tool layer's stated design is that model output never influences query
+structure: the model fills typed arguments and never sees SQL (standing rule
+4). `query_invoices` honoured that at the SQL level, because every value was a
+bound parameter. But its `supplier_name` filter was `s.name ILIKE %s` bound to
+`f"%{supplier_name}%"`, with the model's text unescaped. LIKE patterns are a
+second language inside the parameter. A `%` or `_` in the model's input was
+pattern syntax, not text, so model output decided what the filter matched:
+- **`supplier_name="%"` returned every supplier's invoices.** It became the
+  pattern `%%%`, which matches any name. No injection and no SQL error, just
+  a filter that filtered nothing.
+- **A partial name leaked across suppliers silently.** `"Blue Ridge Logistic"`
+  is a substring of both `Blue Ridge Logistics` and `Blue Ridge Logistic Co`,
+  and the result mixed both suppliers' invoices with no indication. Task 009,
+  which is built on exactly that near-duplicate pair, described the leak as
+  its trap mechanism, so the bug was hiding behind a documented behaviour.
+
+**How it was found.** Not by a test. A live test
+(`test_query_invoices_filters_by_supplier_name`) failed against a stale
+expected set, `{1, 12}`. Before that expectation was updated, the filter
+itself was required to be shown correct, not just the test made green.
+Reading the implementation found the substring match and the unescaped
+wildcards. That test had never run until then (CI had no live job yet),
+which is also why the stale expectation had survived since it was written.
+
+**Fix (commit `2493619`).** Wildcards are escaped (`_like_escape`: `\`, `%`,
+`_`), so model input is always literal text. The name must then resolve to
+exactly one supplier (`pick_supplier`): an exact case-insensitive full name
+wins, otherwise the query must match one supplier, and a query matching
+several is refused with the candidates listed, instead of returning mixed
+data. Task 009's notes and the tool description were updated to match.
+
+**Validation.** The new tests were proven, not just green: with the old
+filter restored in the source, they failed, and they passed again once the
+fix was back. That check was first run when the fix was made. It was
+re-measured, together with the full suites, for `docs/methodology.md`
+("Test validation"), which records the exact counts. The decision logic
+also has offline unit tests (`tests/test_supplier_match.py`).
+
+**Status: closed.** Open question: is any other tool argument read by an
+interpreter inside a bound parameter? At the time of writing, every other
+filter is `=`, `>=` or `<=` on a typed value. A new filter that uses LIKE,
+a regex or JSON paths needs the same escaping.
 
 ## Trap tasks and the do-nothing agent
 

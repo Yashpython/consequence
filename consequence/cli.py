@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from consequence.environment import reset, snapshot
-from consequence.graders.state import GradingIntegrityError, grade_run
+from consequence.graders.state import GRADING_ERROR, GradingIntegrityError, grade_run
 from consequence.harness import DEFAULT_MAX_TURNS, Task, begin_run, run_episode
 from consequence.providers.base import Provider
 from consequence.providers.registry import compute_cost, load_model_registry, make_provider
@@ -253,12 +253,19 @@ def cmd_run(args: argparse.Namespace, provider_factory: ProviderFactory) -> int:
 # -- grade -----------------------------------------------------------------
 
 
-def _grade_state(args: argparse.Namespace, results: Results) -> None:
+def _grade_state(args: argparse.Namespace, results: Results) -> int:
+    """Grade with the state grader and print the results. Returns the number
+    of grading errors (episodes whose verifier raised)."""
     summary = grade_run(args.run_id, results, regrade=args.regrade)
     for g in summary.graded:
+        if g.grading_status == GRADING_ERROR:
+            print(f"GRADING ERROR episode={g.episode_id} task={g.task_id} ({g.reason})")
+            continue
+        collateral = ("clean" if g.collateral_clean
+                      else g.collateral_severity if g.collateral_clean is False
+                      else GRADING_ERROR)
         line = (f"graded episode={g.episode_id} task={g.task_id} status={g.status} "
-                f"state_verifier={'pass' if g.passed else 'FAIL'} "
-                f"collateral={'clean' if g.collateral_clean else g.collateral_severity}")
+                f"state_verifier={'pass' if g.passed else 'FAIL'} collateral={collateral}")
         if g.status != "completed":
             line += f" ({g.reason})"
         print(line)
@@ -268,9 +275,19 @@ def _grade_state(args: argparse.Namespace, results: Results) -> None:
     counts = summary.pass_counts()
     rates = " | ".join(f"{c} {counts[c]['passed']}/{counts[c]['total']} passed"
                        for c in CATEGORY_ORDER if c in counts)
-    severities = [g.collateral_severity or "clean" for g in summary.graded]
+    with_verdict = [g for g in summary.graded if g.collateral_clean is not None]
+    severities = [g.collateral_severity or "clean" for g in with_verdict]
     print(f"totals: state_verifier {rates or 'none graded'}; collateral "
           + ", ".join(f"{severities.count(k)} {k}" for k in ("clean", "benign", "destructive")))
+    satisfied = summary.incomplete_but_verifier_satisfied()
+    if satisfied:
+        print("did not complete, but the final state satisfied the verifier (counted as failed): "
+              + " | ".join(f"{c} {satisfied[c]}" for c in CATEGORY_ORDER if c in satisfied))
+    errors = summary.grading_errors()
+    if errors:
+        print(f"grading errors: {len(errors)} episode(s) have no verdict and are excluded "
+              "from the totals above; fix the verifier and grade again to retry them")
+    return len(errors)
 
 
 def _grade_custom(args: argparse.Namespace, results: Results, name: str,
@@ -291,24 +308,32 @@ def cmd_grade(args: argparse.Namespace, graders: Mapping[str, GraderFn]) -> int:
     requested = set(ALL_GRADER_NAMES) if args.grader == "all" else {args.grader}
     available = set(BUILTIN_GRADERS) | set(graders)
     missing = requested - available
-    if missing == requested:
-        raise CLIError(f"grader(s) not implemented yet: {sorted(missing)}. "
-                       f"available: {sorted(available)}")
+    # Fail closed, like every other integrity path: if any requested grader
+    # can't run, run none of them. `--grader all` that quietly ran a subset
+    # would report a partial grading as a complete one.
+    if missing:
+        raise CLIError(f"grader(s) not implemented yet, so nothing was graded: "
+                       f"{', '.join(sorted(missing))}. available: {sorted(available)}")
 
     results = Results(args.results_db)
     try:
         if results.get_run(args.run_id) is None:
             raise CLIError(f"no run {args.run_id}")
-        for name in sorted(requested - missing):
+        grading_errors = 0
+        for name in sorted(requested):
             if name == "state_verifier":
                 try:
-                    _grade_state(args, results)
+                    grading_errors += _grade_state(args, results)
                 except GradingIntegrityError as exc:
                     raise CLIError(f"grading stopped, nothing written: {exc}") from exc
             else:
                 _grade_custom(args, results, name, graders[name])
-        if missing:
-            print(f"not implemented yet, not run: {', '.join(sorted(missing))}")
+        if grading_errors:
+            # Every other episode is graded and recorded; the exit code says
+            # the grading isn't complete.
+            print(f"error: {grading_errors} episode(s) could not be graded (grading_error)",
+                  file=sys.stderr)
+            return 1
         return 0
     finally:
         results.close()
@@ -349,10 +374,16 @@ def build_report(results: Results, run_id: int) -> dict[str, Any]:
         total_turns += e["turn_count"] or 0
 
     # grader -> category -> {"passed", "total"}; deliberately no cross-category sum.
+    # Only rows with a verdict count. A grading error is neither a pass nor a
+    # fail, so it is counted on its own, never folded into a total.
     grading: dict[str, dict[str, dict[str, int]]] = {}
+    grading_errors: dict[str, int] = {}
     for e in episodes:
         category = task_category(e["task_id"])
         for g in results.gradings_for_episode(e["id"]):
+            if g["status"] == GRADING_ERROR:
+                grading_errors[g["grader"]] = grading_errors.get(g["grader"], 0) + 1
+                continue
             bucket = grading.setdefault(g["grader"], {}).setdefault(
                 category, {"passed": 0, "total": 0}
             )
@@ -368,6 +399,7 @@ def build_report(results: Results, run_id: int) -> dict[str, Any]:
         "total_cost_usd": total_cost,
         "total_turns": total_turns,
         "grading": grading,
+        "grading_errors": grading_errors,
     }
 
 
@@ -394,6 +426,8 @@ def render_report_md(report: dict[str, Any]) -> str:
             if category in by_category
         ]
         lines.append(f"    {grader_name}: {' | '.join(parts)}")
+    for grader_name, count in report["grading_errors"].items():
+        lines.append(f"    {grader_name}: {count} grading error(s), no verdict, not counted above")
     return "\n".join(lines)
 
 
