@@ -25,6 +25,7 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from consequence.config import load_config
 from consequence.environment import reset, snapshot
 from consequence.graders import judge
 from consequence.graders.state import GRADING_ERROR, GradingIntegrityError, grade_run
@@ -37,8 +38,8 @@ from consequence.providers.registry import (
     make_provider,
     primary_judge,
 )
-from consequence.results import Results
-from consequence.tasks import TASKS, TASKS_BY_ID, get_task
+from consequence.results import DEFAULT_DB_PATH, Results
+from consequence.tasks import TASKS, get_task
 
 # A rough, fixed per-episode token estimate used ONLY for the `run --dry-run`
 # cost preview. This is a planning estimate, not a measurement: it is never
@@ -130,6 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser = sub.add_parser("report", help="Report on a run")
     report_parser.add_argument("--run", type=int, required=True, dest="run_id")
     report_parser.add_argument("--format", choices=["md", "json"], default="md")
+    report_parser.add_argument(
+        "--pass-k", type=int, nargs="*", default=[], metavar="K",
+        help="Also report pass^k for each K (all K trials of a task pass)",
+    )
 
     sub.add_parser("status", help="What has been run, and what is still ungraded")
 
@@ -441,101 +446,19 @@ def cmd_grade(args: argparse.Namespace, judge_provider_factory: ProviderFactory)
 CATEGORY_ORDER = ("normal", "trap", "unknown")
 
 
-def task_category(task_id: str) -> str:
-    """'trap' or 'normal' per the task catalog; 'unknown' if the task isn't in
-    it (e.g. an episode recorded against a task that has since been removed)."""
-    task = TASKS_BY_ID.get(task_id)
-    if task is None:
-        return "unknown"
-    return "trap" if task.difficulty == "trap" else "normal"
-
-
-def build_report(results: Results, run_id: int) -> dict[str, Any]:
-    run = results.get_run(run_id)
-    if run is None:
-        raise CLIError(f"no run {run_id}")
-
-    episodes = results.episodes_for_run(run_id)
-    by_status: dict[str, int] = {}
-    total_cost = 0.0
-    total_turns = 0
-    for e in episodes:
-        by_status[e["status"]] = by_status.get(e["status"], 0) + 1
-        total_cost += e["cost_usd"] or 0.0
-        total_turns += e["turn_count"] or 0
-
-    # grader -> category -> {"passed", "total"}; deliberately no cross-category sum.
-    # A judge's rows are keyed "grader:judge_model", so two judges are never
-    # blended either. Only rows with a verdict count: a grading_error or a
-    # judge_error is neither a pass nor a fail, so it is counted on its own.
-    grading: dict[str, dict[str, dict[str, int]]] = {}
-    grading_errors: dict[str, int] = {}
-    judge_cost = 0.0
-    for e in episodes:
-        category = task_category(e["task_id"])
-        for g in results.gradings_for_episode(e["id"]):
-            key = f"{g['grader']}:{g['judge_model']}" if g["judge_model"] else g["grader"]
-            judge_cost += g["judge_cost_usd"] or 0.0
-            if g["status"] != "graded":
-                grading_errors[key] = grading_errors.get(key, 0) + 1
-                continue
-            bucket = grading.setdefault(key, {}).setdefault(
-                category, {"passed": 0, "total": 0}
-            )
-            bucket["total"] += 1
-            bucket["passed"] += int(bool(g["passed"]))
-
-    return {
-        "run_id": run_id,
-        "started_at": run["started_at"],
-        "finished_at": run["finished_at"],
-        "episode_count": len(episodes),
-        "by_status": by_status,
-        "total_cost_usd": total_cost,  # the episodes' cost only, never judging
-        "judge_cost_usd": judge_cost,
-        "total_turns": total_turns,
-        "grading": grading,
-        "grading_errors": grading_errors,
-    }
-
-
-def render_report_md(report: dict[str, Any]) -> str:
-    lines = [
-        f"# Run {report['run_id']} report",
-        f"- started: {report['started_at']}",
-        f"- finished: {report['finished_at']}",
-        f"- episodes: {report['episode_count']}",
-        f"- status breakdown: {report['by_status']}",
-        f"- total cost: {_format_cost(report['total_cost_usd'])}",
-        f"- judging cost (separate): {_format_cost(report['judge_cost_usd'])}",
-        f"- total turns: {report['total_turns']}",
-    ]
-    if not report["grading"]:
-        lines.append("- grading: none yet")
-        return "\n".join(lines)
-
-    lines.append("- grading (trap and normal tasks reported separately, never combined):")
-    for grader_name, by_category in report["grading"].items():
-        parts = [
-            f"{category} {by_category[category]['passed']}/{by_category[category]['total']}"
-            f" passed"
-            for category in CATEGORY_ORDER
-            if category in by_category
-        ]
-        lines.append(f"    {grader_name}: {' | '.join(parts)}")
-    for grader_name, count in report["grading_errors"].items():
-        lines.append(f"    {grader_name}: {count} without a verdict (grading or judge error), "
-                     "not counted above")
-    return "\n".join(lines)
-
-
 def cmd_report(args: argparse.Namespace) -> int:
-    results = Results(args.results_db)
+    """Every figure comes from consequence.metrics via consequence.report;
+    nothing is computed here."""
+    from consequence import report
+    from consequence.metrics import MetricsError, RunMetrics
+
+    path = args.results_db or load_config().results_db_path or DEFAULT_DB_PATH
     try:
-        report = build_report(results, args.run_id)
-    finally:
-        results.close()
-    print(json.dumps(report, indent=2) if args.format == "json" else render_report_md(report))
+        with RunMetrics(path, args.run_id) as m:
+            data = report.build_report(m, pass_k=tuple(args.pass_k))
+    except MetricsError as exc:
+        raise CLIError(str(exc)) from exc
+    print(json.dumps(data, indent=2) if args.format == "json" else report.render_markdown(data))
     return 0
 
 

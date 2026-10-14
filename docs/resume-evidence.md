@@ -39,11 +39,11 @@ adapters for Anthropic, OpenAI, Google and OpenRouter.
 | Tools exposed to the agent | 7 <!-- fact:tools.count --> | MEASURED | `consequence/tools/schema.py` `TOOLS` |
 | Models in the registry | 5 <!-- fact:models.count --> | MEASURED | `consequence/models.yaml` |
 | Judge models (separate `judges:` section) | 2 <!-- fact:judges.count --> | MEASURED | `consequence/models.yaml` `judges:` |
-| Metrics computed from the results DB | 15 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
+| Metrics computed from the results DB | 17 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
 | Providers in the registry | 4 <!-- fact:providers.count --> | MEASURED | `provider` field in `consequence/models.yaml` |
 | Trials per (task, model) in the experiment | NOT YET MEASURED | NOT YET MEASURED | Not fixed yet: `consequence run --trials` defaults to one. Set by the first real run. |
 | Total episodes run against real models | NOT YET MEASURED | NOT YET MEASURED | `consequence status` after the first real run. No real run exists. |
-| Offline tests | 617 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
+| Offline tests | 628 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
 | Live tests (real Postgres) | 332 <!-- fact:tests.live --> | MEASURED | `pytest --collect-only -q -m live` |
 | Smoke tests (one billed API call each) | 4 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`. Never run; see section 9. |
 | Adversarial strategies | 6 <!-- fact:adversarial.strategies --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
@@ -57,6 +57,8 @@ None of these exist yet: no episode has been run against a real model. Each
 entry fixes the definition now, so the number can't be redefined after it is
 seen. Every value will be computed by `consequence/metrics.py`, from the
 run's `results.db` and nowhere else; `RunMetrics(db, run)` below opens it.
+`consequence report --run N [--format json] [--pass-k K ...]` lays all of
+them out per model, computing nothing itself (`consequence/report.py`).
 Every rate carries its n and a Wilson score 95% interval, normal and trap are
 always separate, and judge metrics are always per judge. When `docs/findings.md` exists, every value here is cited from its
 marked blocks, never copied.
@@ -214,6 +216,26 @@ marked blocks, never copied.
 - **Regenerate:** `RunMetrics(db, run).latency_stats(model)` and
   `.turn_stats(model)`.
 
+### 3.13 Judging cost
+
+- **Definition:** what one judge cost on a run, across its `llm_judge` and
+  `llm_judge_stability` rows, judge errors included (a failed call still
+  spends tokens). Judging spend only: never part of an episode's cost or of
+  cost per solved task.
+- **Formula:** sum of `gradings.judge_cost_usd` for that judge; unknown if any
+  row's cost is unknown.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the live judging commit.
+- **Regenerate:** `RunMetrics(db, run).judge_cost(judge_model)`.
+
+### 3.14 Episode outcomes
+
+- **Definition:** episodes per status (completed, error, timeout, max_turns),
+  per model and category.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the first real run.
+- **Regenerate:** `RunMetrics(db, run).episode_status_counts(model)`.
+
 ## 4. Engineering decisions worth claiming
 
 | Decision | Why it was made | Where it is enforced in code | What it rules out |
@@ -231,6 +253,7 @@ marked blocks, never copied.
 | Trap tasks scored separately from normal tasks | An agent that does nothing passes every trap | `cli.build_report` and `GradingSummary.pass_counts` group by category with no combined figure | A headline pass rate inflated by inaction |
 | A sensitivity bound for episodes with no verdict | A grading or judge error is neither a pass nor a fail, so it can't be counted; but silently dropping it can bias the rate, and the dropped episodes may not be random | `consequence/metrics.py`: every rate returns `no_verdict` and `ungraded` counts beside n, and `verification_gap` returns `bound_low_pp` / `bound_high_pp`, the gap recomputed with every missing verdict at each extreme | A headline gap that hides how much it depends on episodes nobody could grade |
 | All reported numbers come from one read-only module | One definition per number, and no way for reporting code to change the record | `consequence/metrics.py` opens `results.db` read-only and imports only the standard library and yaml; a test imports it in a fresh interpreter to prove it loads no model, environment or seed code | Two places computing the same number differently; a metric that quietly writes or calls a model |
+| The report computes nothing | A report that does its own counting is a second definition of every number, and the old one pooled models together | `consequence/report.py` only calls `RunMetrics` and formats; `tests/test_report.py` parses it and rejects arithmetic operators, counting builtins and direct DB access, checks every figure equals the metrics' own, and checks it imports nothing but `consequence.metrics` | A report figure that disagrees with the metric it claims to show; results pooled across models |
 | Two notions of success kept apart | An episode that crashed after the right write must still fail, but that fact is worth reporting | `gradings.passed` vs `gradings.verifier_verdict_raw`; `status = 'grading_error'` for a verifier that raises | Crashes counted as passes; verifier bugs counted as agent failures |
 
 How I would say each one out loud:
@@ -277,6 +300,10 @@ How I would say each one out loud:
   opens the results file read-only and can't reach a model or the
   environment. There is one definition of each number and nothing else
   computes it.
+- **The report computes nothing.** The report only lays out what the metrics
+  module returns; a test reads the report's own source and fails if it finds
+  any arithmetic or counting. So there is exactly one definition of every
+  number, and the report can't drift from it.
 - **Two notions of success.** If an agent makes the right write and then
   crashes, the episode fails, but I keep the verifier's raw verdict for
   analysis. If the verifier itself crashes, that's recorded as a grading
@@ -417,6 +444,26 @@ How I would say each one out loud:
 - **How it was proven:** `test_grade_all_fails_closed_when_a_registered_grader_cannot_run`
   asserts the refusal and that no rows were written.
 
+### 5.10 The run report pooled every model together
+
+- **What was wrong:** `consequence report` computed its own pass counts,
+  costs and turn totals, and keyed them by grader only, so every model in a
+  run was summed into one figure. A run comparing models reported one blended
+  pass rate per grader, and the report's numbers had a second definition
+  separate from the metrics.
+- **How it was discovered:** while adding `consequence/metrics.py`, whose rule
+  is that every reported number comes from it. Comparing the two showed the
+  report never split by model.
+- **Mechanism:** the report predated per-model reporting; it was written when
+  runs held one model, and aggregated whatever rows a run contained.
+- **Fix:** uncommitted at time of writing. `consequence/report.py` builds every
+  table per model from `RunMetrics` and computes nothing; `cli.py` only calls
+  it.
+- **How it was proven:** `tests/test_report.py` rejects any arithmetic in the
+  report's source, checks every figure equals the metric's, and checks two
+  models stay apart; planting the pooling back made report and CLI tests
+  fail (checked by hand; the run's output isn't stored).
+
 ## 6. Evidence that the work validates itself
 
 ### Adversarial verifier audit
@@ -483,7 +530,7 @@ something not yet measured.
 - **READY** Caught a write-then-revert exploit that passed all 25 <!-- fact:adversarial.transient_write.succeeded_at_baseline --> verifiers, by adding an audit-trail check that every verifier inherits centrally.
 - **READY** Found and fixed a tool-layer bug where a single wildcard character in model input returned every supplier's records, proven by restoring the old filter and watching 5 <!-- fact:planted.substring_supplier_filter.live --> new tests fail.
 - **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 24 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
-- **READY** Built a test suite of 617 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
+- **READY** Built a test suite of 628 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
 - **DRAFT** Measured how often agents claim success the database contradicts (verification gap: NOT YET MEASURED) across the registry's models, by grading final state instead of transcripts.
 - **DRAFT** Showed the difference between one-shot and every-time reliability (pass@1 vs pass^k: NOT YET MEASURED), by running repeated trials per task and model.
 - **DRAFT** Quantified collateral damage (rate: NOT YET MEASURED) by classifying every out-of-scope row change as benign or destructive.
@@ -530,10 +577,10 @@ something not yet measured.
   bound of -30 to +30. Quote the bound with the gap.
 - **A Wilson interval on pass^k.** pass^k is a mean of per-task estimates;
   its interval is a bootstrap over tasks, not Wilson. Say which.
-- **Mutation checks on the metrics tests.** Four bugs were planted in
-  `metrics.py` by hand while it was written, and each was caught, but the
-  outputs aren't stored; add them to `consequence/planted_bugs.py` before
-  citing a count.
+- **Mutation checks on the metrics and report tests.** Four bugs were planted
+  in `metrics.py` and four in `report.py` by hand while they were written, and
+  each was caught, but the outputs aren't stored; add them to
+  `consequence/planted_bugs.py` before citing a count.
 - **Lines of code, or speed and cost of a full run.** Not measured.
 - **The do-nothing agent's score on traps as a finding.** It is a property of
   the task design, shown with a mock agent, not a measured model behaviour.
@@ -542,6 +589,7 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-13 | uncommitted report work | `consequence/report.py` now lays out `consequence/metrics.py` per model and computes nothing; added the judging cost (3.13) and episode outcome (3.14) definitions, two metrics behind them, the "report computes nothing" engineering decision, and defect 5.10 (the old report pooled every model). Metric count 15 to 17. |
 | 2026-10-13 | uncommitted metrics work | Added `consequence/metrics.py` as the only source of reported numbers. Rewrote section 3 so every definition matches the code and names its `RunMetrics` call: new definitions for the trap behaviour split (3.10), cross-judge agreement over the intersection (3.8) and grading coverage (3.11), plus time and turns (3.12). Corrected three earlier definitions to match the metrics as specified: the verification gap is a difference in percentage points, not a share of judge passes; collateral is over state passes only; cost per solved task is per category, traps included. Added the no-verdict sensitivity bound and the single metrics module to section 4, a scale fact, and section 9 guards. |
 | 2026-10-11 | uncommitted judge work | Added the LLM judge: scale facts (judge models), section 3 definitions for the verification gap, judge API agreement, stability, cross-family comparison and the new 3.10 trap behaviour split, three engineering decisions, the reframed adversarial row (structural limits), a DRAFT bullet, and section 9 guards. Corrected 3.6, which wrongly defined judge API agreement as judge-vs-state agreement. |
 | 2026-10-11 | `c66c78d` plus uncommitted hardening work | Created. Backfilled from every commit, `a033e8e` through `c66c78d`, and the hardening work in progress. Added the ledger check (`consequence/ledger.py`) and the planted-bug harness whose output section 6 cites. |

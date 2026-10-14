@@ -535,8 +535,47 @@ def test_mirrored_constants_match_their_sources():
     assert metrics.primary_judge_id() == "judge-claude-opus-5"
 
 
+def test_episode_status_counts(tmp_path):
+    m, _ = open_run(tmp_path, [
+        {"task": N1, "status": "completed"}, {"task": N1, "status": "error"},
+        {"task": N1, "status": "error"}, {"task": T, "status": "max_turns"},
+        {"task": N1, "model": "m-b", "status": "timeout"},
+    ])
+    with m:
+        assert m.episode_status_counts("m-a") == {
+            "normal": {"completed": 1, "error": 2, "timeout": 0, "max_turns": 0},
+            "trap": {"completed": 0, "error": 0, "timeout": 0, "max_turns": 1}}
+        assert m.models() == ["m-a", "m-b"]  # per model: m-b's episode isn't in m-a's counts
+        assert m.run_info().episodes == 5
+
+
+def test_judge_cost_is_per_judge_and_complete(tmp_path):
+    path = tmp_path / "results.db"
+    with Results(path) as results:
+        run_id = seed_run(results)
+        [ep] = build(results, run_id, [{"task": N1, "state": True}])
+        for grader, temperature in (("llm_judge", 0.0), ("llm_judge_stability", 0.7)):
+            results.record_judge_grading(ep, grader, J1, passed=True, behaviour="completed",
+                                         confidence=0.9, temperature=temperature,
+                                         agreement=1.0, input_tokens=100, output_tokens=10,
+                                         cost_usd=0.25)
+        results.record_judge_error(ep, "llm_judge", J2, reason="malformed_output",
+                                   temperature=0.0, input_tokens=50, output_tokens=5,
+                                   cost_usd=0.05)  # an error still cost money
+    with RunMetrics(path, run_id) as m:
+        primary = m.judge_cost(J1)
+        second = m.judge_cost(J2)
+        assert m.judge_models() == [J1, J2]
+        assert m.cost_per_solved_task("m-a")["normal"].total_cost_usd == pytest.approx(0.10)
+    assert (primary.rows, primary.input_tokens, primary.output_tokens) == (2, 200, 20)
+    assert primary.cost_usd == pytest.approx(0.50)
+    assert primary.by_grader == {"llm_judge": pytest.approx(0.25),
+                                 "llm_judge_stability": pytest.approx(0.25)}
+    assert (second.rows, second.cost_usd) == (1, pytest.approx(0.05))
+
+
 def test_every_listed_metric_exists():
-    assert len(metrics.METRICS) == 15
+    assert len(metrics.METRICS) == 17
     for name in metrics.METRICS:
         assert callable(getattr(RunMetrics, name)), name
 

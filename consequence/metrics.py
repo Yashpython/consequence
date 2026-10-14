@@ -79,7 +79,9 @@ METRICS = (
     "collateral_rate", "cost_per_solved_task", "latency_stats", "turn_stats",
     "judge_api_agreement", "judge_vote_agreement", "trap_behaviour_split",
     "cross_judge_agreement", "incomplete_but_verifier_satisfied", "grading_coverage",
+    "episode_status_counts", "judge_cost",
 )
+EPISODE_STATUSES = ("completed", "error", "timeout", "max_turns")
 
 
 class MetricsError(Exception):
@@ -231,6 +233,28 @@ class Coverage:
     grading_error: int
     judge_error: int
     missing: int  # episodes with no row from this grader
+
+
+@dataclass(frozen=True)
+class JudgeCost:
+    """What one judge cost to run on this run: judging spend only, never part
+    of the experiment's episode cost."""
+
+    judge_model: str
+    rows: int  # gradings rows, verdicts and judge_errors (errors spend tokens too)
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float | None  # None if any row's cost is unknown
+    unpriced_rows: int
+    by_grader: dict[str, float | None]  # llm_judge vs llm_judge_stability
+
+
+@dataclass(frozen=True)
+class RunInfo:
+    run_id: int
+    started_at: str
+    finished_at: str | None
+    episodes: int
 
 
 # -- configuration read as data ---------------------------------------------------------------
@@ -499,7 +523,7 @@ class RunMetrics:
             solved = sum(self._verdict(rows.get(e["id"])) is True for e in episodes)
             costs = [e["cost_usd"] for e in episodes]
             unpriced = sum(c is None for c in costs)
-            total = sum(c for c in costs if c is not None)
+            total = math.fsum(c for c in costs if c is not None)
             reason = ("no state-verified passes" if solved == 0
                       else f"{unpriced} episode(s) have no known cost" if unpriced else None)
             out[cat] = CostPerSolved(value=None if reason else total / solved,
@@ -659,6 +683,56 @@ class RunMetrics:
         counts = {cat: 0 for cat in self._by_category(model)}
         counts.update(Counter(self._category(r["task_id"]) for r in rows))
         return counts
+
+    def episode_status_counts(self, model: str) -> dict[str, dict[str, int]]:
+        """16. Episodes per status (completed, error, timeout, max_turns), per
+        category."""
+        return {cat: {status: sum(e["status"] == status for e in eps)
+                      for status in EPISODE_STATUSES}
+                for cat, eps in self._by_category(model).items()}
+
+    def judge_cost(self, judge_model: str) -> JudgeCost:
+        """17. Everything one judge cost on this run, across its llm_judge and
+        llm_judge_stability rows, judge_errors included. Judging spend only:
+        cost_per_solved_task uses the episodes' own cost, never this."""
+        _require_judge(judge_model)
+        rows = self._conn.execute(
+            "SELECT g.grader, g.judge_input_tokens, g.judge_output_tokens, g.judge_cost_usd "
+            "FROM gradings g JOIN episodes e ON e.id = g.episode_id "
+            "WHERE e.run_id = ? AND g.judge_model = ?", (self.run_id, judge_model),
+        ).fetchall()
+        costs = [r["judge_cost_usd"] for r in rows]
+        unpriced = sum(c is None for c in costs)
+        by_grader: dict[str, float | None] = {}
+        for grader in sorted({r["grader"] for r in rows}):
+            mine = [r["judge_cost_usd"] for r in rows if r["grader"] == grader]
+            by_grader[grader] = None if None in mine else math.fsum(mine)
+        return JudgeCost(
+            judge_model=judge_model, rows=len(rows),
+            input_tokens=sum(r["judge_input_tokens"] or 0 for r in rows),
+            output_tokens=sum(r["judge_output_tokens"] or 0 for r in rows),
+            cost_usd=None if unpriced else math.fsum(costs), unpriced_rows=unpriced,
+            by_grader=by_grader,
+        )
+
+    # -- lookups: what there is to report on -------------------------------------------------
+
+    def run_info(self) -> RunInfo:
+        row = self._conn.execute("SELECT started_at, finished_at FROM runs WHERE id = ?",
+                                 (self.run_id,)).fetchone()
+        return RunInfo(run_id=self.run_id, started_at=row["started_at"],
+                       finished_at=row["finished_at"], episodes=len(self._episodes()))
+
+    def models(self) -> list[str]:
+        """The models with episodes in this run."""
+        return sorted({e["model_id"] for e in self._episodes()})
+
+    def judge_models(self) -> list[str]:
+        """The judges with any row in this run."""
+        return sorted({r["judge_model"] for r in self._conn.execute(
+            "SELECT DISTINCT g.judge_model FROM gradings g JOIN episodes e "
+            "ON e.id = g.episode_id WHERE e.run_id = ? AND g.judge_model != ''",
+            (self.run_id,))})
 
     def grading_coverage(self) -> list[Coverage]:
         """15. For every grader and judge model that graded this run: how many

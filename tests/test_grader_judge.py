@@ -399,8 +399,9 @@ def test_a_second_judge_grades_a_subset_and_results_split_by_judge(run, capsys, 
     assert primary == set(run["ids"].values()) and len(second) == 3 and second < primary
     capsys.readouterr()
     main(["--results-db", db, "report", "--run", run_id, "--format", "json"])
-    grading = json.loads(capsys.readouterr().out)["grading"]
-    assert {f"llm_judge:{TEST_JUDGE.id}", f"llm_judge:{SECOND_JUDGE.id}"} <= set(grading)
+    judges = json.loads(capsys.readouterr().out)["models"]["mock"]["judges"]
+    assert set(judges) == {TEST_JUDGE.id, SECOND_JUDGE.id}  # split by judge, never pooled
+    assert judges[SECOND_JUDGE.id]["pass_rate"]["normal"]["ungraded"] > 0  # the subset shows
 
 
 # -- F. trap-task discrimination ---------------------------------------------------------------
@@ -509,8 +510,14 @@ def test_judging_cost_is_tracked_apart_from_experiment_cost(run, capsys):
     main(["--results-db", str(run["db"]), "report", "--run", str(run["run_id"]),
           "--format", "json"])
     report = json.loads(capsys.readouterr().out)
-    assert report["judge_cost_usd"] == pytest.approx(per_episode * len(EPISODES))
-    assert report["total_cost_usd"] == pytest.approx(sum(c or 0 for c in before))
+    assert report["judging_cost"][TEST_JUDGE.id]["cost_usd"] == pytest.approx(
+        per_episode * len(EPISODES))
+    # The mock agent has no price, so the experiment's cost is unknown -- and
+    # the judge's spend never fills that gap.
+    costs = report["models"]["mock"]["cost_per_solved_task"]
+    assert all(c["total_cost_usd"] == 0 and c["unpriced"] == c["episodes"]
+               for c in costs.values())
+    assert before == [None] * len(EPISODES)
 
 
 # -- the judges in models.yaml ------------------------------------------------------------------

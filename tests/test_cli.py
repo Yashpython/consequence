@@ -233,14 +233,17 @@ def test_report_json_reflects_persisted_rows(db_path, capsys, judges):
     rc = main(["--results-db", db_path, "report", "--run", str(run_id), "--format", "json"])
     assert rc == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["episode_count"] == 2
-    assert report["by_status"] == {"completed": 2}
-    # t1/t2 aren't catalog tasks, so they report under "unknown"; a judge's
-    # verdicts are keyed by judge, so two judges are never blended.
-    assert report["grading"]["llm_judge:judge-test"] == {"unknown": {"passed": 1, "total": 2}}
+    assert report["run"]["episodes"] == 2
+    model = report["models"]["mock-1"]  # per model, never pooled
+    # t1/t2 aren't catalog tasks, so they report under "unknown".
+    assert model["episodes"] == {"unknown": {"completed": 2, "error": 0, "timeout": 0,
+                                             "max_turns": 0}}
+    judged = model["judges"]["judge-test"]["pass_rate"]["unknown"]  # per judge
+    assert (judged["successes"], judged["n"]) == (1, 2)
+    assert judged["ci_low"] is not None  # every rate carries its interval
     # Experiment cost is the episodes' own; judging is reported apart.
-    assert report["total_cost_usd"] == pytest.approx(0.011)
-    assert report["judge_cost_usd"] > 0
+    assert model["cost_per_solved_task"]["unknown"]["total_cost_usd"] == pytest.approx(0.011)
+    assert report["judging_cost"]["judge-test"]["cost_usd"] > 0
 
 
 def test_report_unknown_run_is_a_clean_error(db_path):
@@ -356,16 +359,17 @@ def test_do_nothing_agent_is_reported_split_not_blended(db_path, offline_env, ca
 
     assert main(["--results-db", db_path, "report", "--run", str(run_id), "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["grading"]["state_verifier"] == {
-        "normal": {"passed": 0, "total": 19},
-        "trap": {"passed": 6, "total": 6},
-    }
+    state = report["models"]["do-nothing"]["state_verifier"]
+    assert set(state) == {"normal", "trap"}  # no combined row
+    assert (state["normal"]["successes"], state["normal"]["n"]) == (0, 19)
+    assert (state["trap"]["successes"], state["trap"]["n"]) == (6, 6)
 
     assert main(["--results-db", db_path, "report", "--run", str(run_id)]) == 0
     md = capsys.readouterr().out
-    assert "state_verifier: normal 0/19 passed | trap 6/6 passed" in md
-    assert "6/25" not in md
-    assert "/25" not in md  # no figure over all 25 tasks, in any form
+    assert "| normal | 0.0% |" in md and "| 0 of 19 |" in md
+    assert "| trap | 100.0% |" in md and "| 6 of 6 |" in md
+    for blended in ("6/25", "/25", "of 25", "24.0%"):  # no figure over all 25 tasks
+        assert blended not in md
 
 
 # -- per-task turn budget ---------------------------------------------------------

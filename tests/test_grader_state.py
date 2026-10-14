@@ -218,7 +218,8 @@ def test_the_raw_verdict_never_reaches_a_pass_count(run, capsys):
     assert main(["--results-db", str(run["db"]), "report", "--run", str(run["run_id"]),
                  "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["grading"][STATE_GRADER]["normal"] == {"passed": 2, "total": 6}
+    normal = report["models"]["mock"]["state_verifier"]["normal"]
+    assert (normal["successes"], normal["n"]) == (2, 6)
 
 
 # -- a verifier that raises is a grading error, not a crash and not a failure -------------
@@ -269,8 +270,10 @@ def test_grading_errors_are_reported_apart_and_exit_nonzero(run, broken_verifier
 
     assert main(["--results-db", db, "report", "--run", run_id, "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["grading"][STATE_GRADER]["normal"] == {"passed": 1, "total": 5}
-    assert report["grading_errors"] == {STATE_GRADER: 1, COLLATERAL_GRADER: 1}
+    normal = report["models"]["mock"]["state_verifier"]["normal"]
+    assert (normal["successes"], normal["n"], normal["no_verdict"]) == (1, 5, 1)
+    errors = {c["grader"]: c["grading_error"] for c in report["coverage"]}
+    assert errors == {STATE_GRADER: 1, COLLATERAL_GRADER: 1}
 
 
 def test_a_collateral_only_grading_error_is_still_reported(run, monkeypatch, capsys):
