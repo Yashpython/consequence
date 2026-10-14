@@ -31,11 +31,11 @@ python -m consequence.planted_bugs --write-doc
 <!-- planted-bugs:start -->
 | Planted bug | What it does | Offline tests failing | Live tests failing |
 |---|---|---|---|
-| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 24 of 555 | 1 of 332 |
-| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 13 of 555 | 1 of 332 |
-| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 555 | 5 of 332 |
+| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 24 of 599 | 1 of 332 |
+| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 13 of 599 | 1 of 332 |
+| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 599 | 5 of 332 |
 
-Measured on 2026-10-12, at commit `6d92c81` plus uncommitted changes (last commit 2026-10-11) by `python -m consequence.planted_bugs --write-doc`.
+Measured on 2026-10-14, at commit `0be69bc` plus uncommitted changes (last commit 2026-10-12) by `python -m consequence.planted_bugs --write-doc`.
 <!-- planted-bugs:end -->
 
 ### Reading the table

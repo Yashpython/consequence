@@ -157,6 +157,8 @@ FACTS: dict[str, Callable[[], str]] = {
     "tools.count": lambda: str(len(__import__("consequence.tools.schema",
                                               fromlist=["TOOLS"]).TOOLS)),
     "models.count": lambda: str(len(_registry())),
+    "metrics.count": lambda: str(len(__import__("consequence.metrics",
+                                                fromlist=["METRICS"]).METRICS)),
     "judges.count": lambda: str(len(__import__("consequence.providers.registry",
                                                fromlist=["x"]).load_judge_registry())),
     "providers.count": lambda: str(len(_providers())),
