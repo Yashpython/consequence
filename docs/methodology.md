@@ -31,11 +31,15 @@ python -m consequence.planted_bugs --write-doc
 <!-- planted-bugs:start -->
 | Planted bug | What it does | Offline tests failing | Live tests failing |
 |---|---|---|---|
-| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 24 of 599 | 1 of 332 |
-| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 13 of 599 | 1 of 332 |
-| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 599 | 5 of 332 |
+| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 25 of 635 | 1 of 332 |
+| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 14 of 635 | 1 of 332 |
+| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 635 | 5 of 332 |
+| `judge_skips_errored_episodes` | The judge grades only completed episodes, so its denominator differs from the state verifier's. | 10 of 635 | 0 of 332 |
+| `judge_truncates_tool_results` | The transcript shown to the judge cuts each tool result at 2,000 characters. | 3 of 635 | 0 of 332 |
+| `judge_skips_overflow_check` | The judge never checks its context window, so an oversized transcript is sent instead of recorded as context_overflow. | 2 of 635 | 0 of 332 |
+| `judge_imports_state_diff` | judge.py imports the state diff module, so the transcript-only guarantee is no longer structural. | 1 of 635 | 0 of 332 |
 
-Measured on 2026-10-14, at commit `0be69bc` plus uncommitted changes (last commit 2026-10-12) by `python -m consequence.planted_bugs --write-doc`.
+Measured on 2026-10-14, at commit `60c72a6` plus uncommitted changes (last commit 2026-10-14) by `python -m consequence.planted_bugs --write-doc`.
 <!-- planted-bugs:end -->
 
 ### Reading the table
@@ -58,6 +62,23 @@ Measured on 2026-10-14, at commit `0be69bc` plus uncommitted changes (last commi
   `tests/test_supplier_match.py` cover the matching logic (`pick_supplier`),
   which this bug bypasses rather than changes. See the incident entry in
   `docs/reward-hacking-log.md`.
+
+- **The four `judge_*` bugs** are the judge's guarantees: it grades the same
+  episodes as the state verifier, sees every byte of every tool result,
+  never sends an oversized transcript, and can't import the state it must
+  stay blind to. The judge is tested only offline, against stubbed judge
+  providers (no live judge call happens in the suite), so none is caught by
+  the live suite. That is by design, not a gap: the live suite exercises the
+  environment and tool layer, which the judge never touches. Truncation is
+  caught only by the tests whose tool results are longer than the cut;
+  ordinary results in the test runs are shorter.
+
+**Baseline first.** The harness runs both suites with no bug planted before
+anything else, and stops without planting or writing if either has a single
+failure. A count only means "these tests caught the bug" if those tests pass
+without it. That guard exists because a run made with the Postgres container
+stopped once reported every planted bug as failing every live test: every
+live test failed for lack of a database, not because of the bug.
 
 ### "Environment DB stopped" is fault injection
 

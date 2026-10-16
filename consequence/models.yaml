@@ -38,7 +38,12 @@ models:
 
   - id: claude-haiku-4.5
     provider: anthropic
-    api_model: claude-haiku-4-5
+    # The dated snapshot. `claude-haiku-4-5` is "a convenience alias that
+    # resolves to the pinned snapshot claude-haiku-4-5-20251001" (checked
+    # 2026-10-14, https://platform.claude.com/docs/en/models/haiku-4-5/overview).
+    # That page also lists Claude Haiku 4.5 as legacy, retirement "Not sooner
+    # than October 15, 2026": confirm it is still served before a real run.
+    api_model: claude-haiku-4-5-20251001
     input_price_per_million: 1.00
     output_price_per_million: 5.00
 
@@ -58,10 +63,10 @@ models:
 #   - api_model and prices are copied from the `models:` entry with the same
 #     api_model, and carry exactly its sourcing (docs/models.md);
 #     tests/test_grader_judge.py fails if they drift apart.
-#   - context_window_tokens must be set from the vendor's documentation for
-#     that exact api_model before any live judging. It is null until then,
-#     and the judge refuses to run while it is null: the overflow check is
-#     what guarantees a transcript is never cut to fit.
+#   - context_window_tokens is taken from the vendor's documentation for that
+#     exact api_model, with the page cited beside each value. The judge
+#     refuses to run while it is null: the overflow check is what guarantees
+#     a transcript is never cut to fit.
 #   - Exactly one judge is primary: it grades every episode. The others are
 #     run on a subset with `consequence grade --judge-model`.
 #   - The primary judge is an Anthropic model, the same family as two of the
@@ -71,15 +76,23 @@ models:
 judges:
   - id: judge-claude-opus-5
     provider: anthropic
+    # A pinned snapshot despite having no date: "Every Claude model ID is a
+    # pinned snapshot, including the dateless IDs used from the 4.6
+    # generation on." (https://platform.claude.com/docs/en/about-claude/models/overview)
     api_model: claude-opus-5
     input_price_per_million: 5.00
     output_price_per_million: 25.00
-    context_window_tokens: null
+    # "Context window: 1M tokens" for claude-opus-5, checked 2026-10-14:
+    # https://platform.claude.com/docs/en/models/opus-5/overview
+    context_window_tokens: 1000000
     primary: true
 
   - id: judge-gpt-5.1
     provider: openai
+    # The dated snapshot ("Snapshot: gpt-5.1-2025-11-13"), not the bare gpt-5.1.
     api_model: gpt-5.1-2025-11-13
     input_price_per_million: 1.25
     output_price_per_million: 10.00
-    context_window_tokens: null
+    # "400,000 context window" for gpt-5.1 / gpt-5.1-2025-11-13, checked
+    # 2026-10-14: https://developers.openai.com/api/docs/models/gpt-5.1
+    context_window_tokens: 400000

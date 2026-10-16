@@ -46,6 +46,11 @@ from consequence.tasks import TASKS, get_task
 # written to the results store and is always printed labeled as an estimate.
 DRY_RUN_ESTIMATED_INPUT_TOKENS = 8_000
 DRY_RUN_ESTIMATED_OUTPUT_TOKENS = 1_500
+# The same kind of planning estimate for one judge call: it reads the judge
+# prompt plus the episode's transcript (taken as the episode's whole input
+# above, which over-counts, since the transcript is the conversation once
+# rather than re-sent every turn), and writes one short verdict.
+DRY_RUN_ESTIMATED_JUDGE_OUTPUT_TOKENS = 500
 
 ProviderFactory = Callable[..., Provider]
 
@@ -95,11 +100,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the plan and an estimated cost, then exit without calling any API",
     )
+    for flag, default, text in (
+        ("--judge-votes", judge.VOTES, "votes per primary verdict"),
+        ("--api-agreement-subset", 0,
+         "episodes given a temperature-0 triplicate (with --judge-votes 1)"),
+        ("--judge-stability-subset", 0, "episodes re-judged 3x at temperature 0.7"),
+        ("--cross-family-subset", 0, "episodes graded by each non-primary judge"),
+    ):
+        run_parser.add_argument(flag, type=int, default=default, metavar="N",
+                                help=f"Dry-run judging estimate: {text} (default {default})")
 
     grade_parser = sub.add_parser("grade", help="Grade the episodes in a run")
     grade_parser.add_argument("--run", type=int, required=True, dest="run_id")
     grade_parser.add_argument(
-        "--grader", required=True, choices=[*ALL_GRADER_NAMES, "all"]
+        "--grader", default=None, choices=[*ALL_GRADER_NAMES, "all"],
+        help="Required unless --preflight",
+    )
+    grade_parser.add_argument(
+        "--preflight", action="store_true",
+        help="Report how many episodes would overflow each judge's context window; "
+             "calls no model and writes nothing",
     )
     grade_parser.add_argument(
         "--regrade", action="store_true", help="Regrade every episode, not just ungraded ones"
@@ -124,8 +144,18 @@ def build_parser() -> argparse.ArgumentParser:
              f"'{judge.STABILITY_GRADER}'",
     )
     grade_parser.add_argument(
+        "--judge-votes", type=int, default=None, metavar="N",
+        help=f"Votes per primary verdict, odd (default {judge.VOTES}). With 1, every "
+             "episode still gets exactly one primary verdict",
+    )
+    grade_parser.add_argument(
+        "--api-agreement-subset", type=int, default=None, metavar="N",
+        help=f"With --judge-votes 1: also judge N sampled episodes {judge.VOTES} times at "
+             f"temperature 0, under grader '{judge.API_AGREEMENT_GRADER}'",
+    )
+    grade_parser.add_argument(
         "--judge-sample-seed", type=int, default=0,
-        help="Seed for --judge-subset / --judge-stability-subset sampling (default 0)",
+        help="Seed for every --*-subset sample (default 0)",
     )
 
     report_parser = sub.add_parser("report", help="Report on a run")
@@ -194,33 +224,93 @@ def _format_cost(cost_usd: float | None) -> str:
     return f"${cost_usd:.4f}" if cost_usd is not None else "unknown"
 
 
-def _print_dry_run(combos: list[tuple[Task, str, int]], registry: Mapping[str, Any]) -> None:
+def estimate_costs(
+    combos: list[tuple[Task, str, int]], registry: Mapping[str, Any],
+    judges: Mapping[str, Any], *, judge_votes: int = 3, api_agreement_subset: int = 0,
+    stability_subset: int = 0, cross_family_subset: int = 0,
+) -> dict[str, Any]:
+    """The dry run's cost estimate, from models.yaml prices and the
+    DRY_RUN_ESTIMATED_* token counts. A planning estimate, never persisted.
+
+    Judging: the primary judge gives every episode one verdict of
+    `judge_votes` votes (so it covers exactly the state verifier's
+    episodes); the API-agreement and stability subsets add 3 votes each per
+    sampled episode on the primary judge; each non-primary judge grades the
+    cross-family subset with `judge_votes` votes. A subset can't exceed the
+    episodes there are.
+    """
+    episodes = len(combos)
+    experiment: dict[str, Any] = {}
+    for model_id in sorted({m for _, m, _ in combos}):
+        count = sum(1 for _, m, _ in combos if m == model_id)
+        per_episode = compute_cost(model_id, DRY_RUN_ESTIMATED_INPUT_TOKENS,
+                                   DRY_RUN_ESTIMATED_OUTPUT_TOKENS, registry=registry)
+        experiment[model_id] = {"episodes": count, "per_episode": per_episode,
+                                "cost": None if per_episode is None else per_episode * count}
+    judge_input = (DRY_RUN_ESTIMATED_INPUT_TOKENS
+                   + judge.estimate_tokens(judge.build_messages(())))
+
+    def call_cost(judge_id: str) -> float | None:
+        return compute_cost(judge_id, judge_input, DRY_RUN_ESTIMATED_JUDGE_OUTPUT_TOKENS,
+                            registry=dict(judges))
+
+    judging = []
+    if judges:
+        primary = primary_judge(judges).id
+        lines = [(f"primary {primary}", primary, episodes, judge_votes),
+                 (f"API-agreement subset (temperature 0), {primary}", primary,
+                  min(api_agreement_subset, episodes), judge.VOTES),
+                 (f"stability subset (temperature {judge.STABILITY_TEMPERATURE}), {primary}",
+                  primary, min(stability_subset, episodes), judge.VOTES)]
+        lines += [(f"cross-family {other}", other, min(cross_family_subset, episodes),
+                   judge_votes) for other in sorted(judges) if other != primary]
+        for label, judge_id, sampled, votes in lines:
+            per_call = call_cost(judge_id)
+            calls = sampled * votes
+            judging.append({"label": label, "episodes": sampled, "votes": votes,
+                            "calls": calls,
+                            "cost": None if per_call is None else per_call * calls})
+    experiment_total = sum(e["cost"] or 0.0 for e in experiment.values())
+    judging_total = sum(j["cost"] or 0.0 for j in judging)
+    return {"episodes": episodes, "experiment": experiment, "judging": judging,
+            "judge_input_tokens": judge_input,
+            "unpriced": sorted([m for m, e in experiment.items() if e["cost"] is None]
+                               + [j["label"] for j in judging if j["cost"] is None]),
+            "experiment_total": experiment_total, "judging_total": judging_total,
+            "grand_total": experiment_total + judging_total}
+
+
+def _print_dry_run(combos: list[tuple[Task, str, int]], estimate: dict[str, Any]) -> None:
     print(f"DRY RUN -- {len(combos)} episode(s) planned, no API calls will be made")
     for task, model_id, trial_index in combos:
         print(f"  would run: task={task.task_id} model={model_id} trial={trial_index}")
-
-    total_cost = 0.0
-    unpriced: list[str] = []
-    for model_id in sorted({m for _, m, _ in combos}):
-        count = sum(1 for _, m, _ in combos if m == model_id)
-        per_episode = compute_cost(
-            model_id, DRY_RUN_ESTIMATED_INPUT_TOKENS, DRY_RUN_ESTIMATED_OUTPUT_TOKENS, registry=registry
-        )
-        if per_episode is None:
-            unpriced.append(model_id)
-            print(f"  {model_id}: {count} episode(s), cost unknown (not in models.yaml)")
+    print("experiment (estimated):")
+    for model_id, e in estimate["experiment"].items():
+        if e["cost"] is None:
+            print(f"  {model_id}: {e['episodes']} episode(s), cost unknown (not in models.yaml)")
         else:
-            subtotal = per_episode * count
-            total_cost += subtotal
-            print(f"  {model_id}: {count} episode(s) x ~{_format_cost(per_episode)} (est.) = ~{_format_cost(subtotal)}")
+            print(f"  {model_id}: {e['episodes']} episode(s) x ~{_format_cost(e['per_episode'])}"
+                  f" = ~{_format_cost(e['cost'])}")
+    print(f"estimated experiment cost: ~{_format_cost(estimate['experiment_total'])} (assumes ~"
+          f"{DRY_RUN_ESTIMATED_INPUT_TOKENS} input / ~{DRY_RUN_ESTIMATED_OUTPUT_TOKENS} output "
+          "tokens per episode -- a planning estimate, not a measurement)")
+    print(f"judging (estimated; ~{estimate['judge_input_tokens']} input / "
+          f"~{DRY_RUN_ESTIMATED_JUDGE_OUTPUT_TOKENS} output tokens per judge call):")
+    for j in estimate["judging"]:
+        print(f"  {j['label']}: {j['episodes']} episode(s) x {j['votes']} vote(s) = "
+              f"{j['calls']} call(s) = ~{_format_cost(j['cost'])}")
+    print(f"estimated judging cost: ~{_format_cost(estimate['judging_total'])}")
+    print(f"estimated grand total: ~{_format_cost(estimate['grand_total'])}")
+    if estimate["unpriced"]:
+        print(f"no price on file for: {estimate['unpriced']}")
 
-    print(
-        f"estimated total cost: ~{_format_cost(total_cost)} (assumes ~"
-        f"{DRY_RUN_ESTIMATED_INPUT_TOKENS} input / ~{DRY_RUN_ESTIMATED_OUTPUT_TOKENS} output "
-        "tokens per episode -- a planning estimate, not a measurement)"
-    )
-    if unpriced:
-        print(f"no price on file for: {sorted(set(unpriced))}")
+
+def _check_judge_votes(votes: int, api_subset: int | None) -> None:
+    if votes < 1 or votes % 2 == 0:
+        raise CLIError(f"--judge-votes must be odd and at least 1, got {votes}")
+    if api_subset and votes != 1:
+        raise CLIError("--api-agreement-subset needs --judge-votes 1: with more votes every "
+                       "episode already has its own temperature-0 agreement figure")
 
 
 def cmd_run(args: argparse.Namespace, provider_factory: ProviderFactory) -> int:
@@ -228,8 +318,17 @@ def cmd_run(args: argparse.Namespace, provider_factory: ProviderFactory) -> int:
     registry = load_model_registry()
 
     if args.dry_run:
-        _print_dry_run(combos, registry)
+        _check_judge_votes(args.judge_votes, args.api_agreement_subset)
+        _print_dry_run(combos, estimate_costs(
+            combos, registry, load_judge_registry(), judge_votes=args.judge_votes,
+            api_agreement_subset=args.api_agreement_subset,
+            stability_subset=args.judge_stability_subset,
+            cross_family_subset=args.cross_family_subset))
         return 0
+    if (args.judge_votes, args.api_agreement_subset, args.judge_stability_subset,
+            args.cross_family_subset) != (judge.VOTES, 0, 0, 0):
+        raise CLIError("the judging options on `run` only shape the --dry-run estimate; "
+                       "judging itself is `consequence grade`")
 
     results = Results(args.results_db)
     try:
@@ -343,6 +442,16 @@ def _judge_setup(args: argparse.Namespace, factory: ProviderFactory) -> dict[str
         raise CLIError(f"--judge-subset is for second judges only: the primary judge "
                        f"({spec.id}) grades every episode, so its verdicts and the state "
                        "verifier's cover the same episodes")
+    votes = args.judge_votes if args.judge_votes is not None else judge.VOTES
+    if stability and args.judge_votes is not None:
+        raise CLIError(f"--judge-stability-subset always takes {judge.VOTES} votes; drop "
+                       "--judge-votes")
+    _check_judge_votes(votes, args.api_agreement_subset)
+    if args.api_agreement_subset is not None and (stability or args.judge_subset is not None
+                                                  or args.judge_temperature not in (None, 0)):
+        raise CLIError("--api-agreement-subset goes with a full temperature-0 primary pass, "
+                       "not with --judge-subset, --judge-stability-subset or a non-zero "
+                       "--judge-temperature")
     temperature = (judge.STABILITY_TEMPERATURE if stability
                    else args.judge_temperature if args.judge_temperature is not None else 0.0)
     try:
@@ -352,39 +461,58 @@ def _judge_setup(args: argparse.Namespace, factory: ProviderFactory) -> dict[str
         raise CLIError(f"the judge can't run, so nothing was graded: {exc}") from exc
     return {"spec": spec, "provider": provider, "temperature": temperature,
             "grader": judge.STABILITY_GRADER if stability else judge.JUDGE_GRADER,
-            "subset": args.judge_stability_subset if stability else args.judge_subset}
+            "subset": args.judge_stability_subset if stability else args.judge_subset,
+            "votes": judge.VOTES if stability else votes,
+            "api_subset": args.api_agreement_subset}
 
 
 def _grade_judge(args: argparse.Namespace, results: Results, setup: dict[str, Any]) -> int:
     """Judge the run and print the results. Returns the number of judge errors."""
-    spec, grader = setup["spec"], setup["grader"]
-    episode_ids, detail = None, {}
-    if setup["subset"] is not None:
-        try:
-            episode_ids = judge.sample_episodes(results, args.run_id, setup["subset"],
-                                                args.judge_sample_seed)
-        except ValueError as exc:
-            raise CLIError(str(exc)) from exc
-        detail = {"sample_seed": args.judge_sample_seed, "sample_size": setup["subset"]}
+    spec = setup["spec"]
+    episode_ids, detail = _sample(args, results, setup["subset"])
     summary = judge.grade_run_with_judge(
-        args.run_id, results, setup["provider"], spec, grader=grader,
+        args.run_id, results, setup["provider"], spec, grader=setup["grader"],
         temperature=setup["temperature"], episode_ids=episode_ids, regrade=args.regrade,
-        detail=detail,
+        votes=setup["votes"], detail=detail,
     )
+    errors = _print_judging(summary, setup["temperature"])
+    if setup["api_subset"] is not None:
+        episode_ids, detail = _sample(args, results, setup["api_subset"])
+        errors += _print_judging(judge.grade_run_with_judge(
+            args.run_id, results, setup["provider"], spec, grader=judge.API_AGREEMENT_GRADER,
+            temperature=0.0, episode_ids=episode_ids, regrade=args.regrade,
+            votes=judge.VOTES, detail=detail), 0.0)
+    return errors
+
+
+def _sample(args: argparse.Namespace, results: Results,
+            size: int | None) -> tuple[list[int] | None, dict[str, int]]:
+    if size is None:
+        return None, {}
+    try:
+        ids = judge.sample_episodes(results, args.run_id, size, args.judge_sample_seed)
+    except ValueError as exc:
+        raise CLIError(str(exc)) from exc
+    return ids, {"sample_seed": args.judge_sample_seed, "sample_size": size}
+
+
+def _print_judging(summary: judge.JudgeSummary, temperature: float) -> int:
+    grader, spec_id = summary.grader, summary.judge_model
     for g in summary.graded:
         if g.status == judge.JUDGE_ERROR:
             print(f"JUDGE ERROR episode={g.episode_id} task={g.task_id} ({g.error_reason})")
         else:
             print(f"judged episode={g.episode_id} task={g.task_id} status={g.episode_status} "
                   f"{grader}={'pass' if g.passed else 'FAIL'} "
-                  f"behaviour={g.behaviour or 'no_majority'} agreement={g.agreement:.2f}")
+                  f"behaviour={g.behaviour or 'no_majority'} agreement="
+                  f"{'n/a (one vote)' if g.agreement is None else f'{g.agreement:.2f}'}")
     if summary.already_graded:
         print(f"skipped {len(summary.already_graded)} already-judged episode(s); "
               "pass --regrade to re-judge them")
     counts = summary.pass_counts()
     rates = " | ".join(f"{c} {counts[c]['passed']}/{counts[c]['total']} passed"
                        for c in CATEGORY_ORDER if c in counts)
-    print(f"totals: {grader} [{spec.id}, temperature {setup['temperature']}] "
+    print(f"totals: {grader} [{spec_id}, temperature {temperature}] "
           f"{rates or 'none judged'}")
     for category, behaviours in summary.behaviour_counts().items():
         print(f"behaviour ({category}): "
@@ -399,10 +527,36 @@ def _grade_judge(args: argparse.Namespace, results: Results, setup: dict[str, An
     return sum(errors.values())
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """How many episodes each judge could not take whole. No model, no writes."""
+    results = Results(args.results_db)
+    try:
+        try:
+            checks = judge.preflight(results, args.run_id, load_judge_registry())
+        except judge.JudgeConfigError as exc:
+            raise CLIError(str(exc)) from exc
+    finally:
+        results.close()
+    for c in checks:
+        if c.context_window_tokens is None:
+            print(f"{c.judge_model}: context_window_tokens not set; this judge can't run")
+            continue
+        print(f"{c.judge_model} (window {c.context_window_tokens} tokens): "
+              f"{c.would_overflow} of {c.episodes} episode(s) would overflow"
+              + (f"; {c.missing_transcript} have no transcript" if c.missing_transcript else ""))
+    return 0
+
+
 def cmd_grade(args: argparse.Namespace, judge_provider_factory: ProviderFactory) -> int:
+    if args.preflight:
+        if args.grader is not None:
+            raise CLIError("--preflight grades nothing; drop --grader")
+        return cmd_preflight(args)
+    if args.grader is None:
+        raise CLIError("--grader is required (or --preflight)")
     requested = set(ALL_GRADER_NAMES) if args.grader == "all" else {args.grader}
     judge_flags = (args.judge_model, args.judge_temperature, args.judge_subset,
-                   args.judge_stability_subset)
+                   args.judge_stability_subset, args.judge_votes, args.api_agreement_subset)
     if "llm_judge" not in requested and any(f is not None for f in judge_flags):
         raise CLIError("--judge-* options apply only to --grader llm_judge or all")
     # Fail closed, like every other integrity path: if any requested grader

@@ -381,6 +381,127 @@ def test_cli_stability_mode(run, capsys, monkeypatch):
     assert {json.loads(r["detail_json"])["sample_seed"] for r in rows.values()} == {3}
 
 
+# -- one primary vote per episode, the triplicate on a sample -----------------------------
+
+
+def _cli_grade(run, *flags, factory=None):
+    return main(["--results-db", str(run["db"]), "grade", "--run", str(run["run_id"]),
+                 "--grader", "llm_judge", *flags],
+                judge_provider_factory=factory or stub_judge_factory(evidence_judge))
+
+
+def test_single_vote_primary_with_an_api_agreement_sample_keeps_parity(run, monkeypatch):
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: TEST_JUDGES)
+    made = []
+    assert _cli_grade(run, "--judge-votes", "1", "--api-agreement-subset", "3",
+                      factory=stub_judge_factory(evidence_judge, made)) == 0
+    primary = _rows(run["db"])
+    sample = _rows(run["db"], judge.API_AGREEMENT_GRADER)
+    # Every episode has exactly one primary verdict, from one vote, with no
+    # agreement figure: one vote can't disagree with itself.
+    assert set(primary) == set(run["ids"].values())
+    assert all(r["judge_api_agreement"] is None and len(json.loads(r["detail_json"])["votes"]) == 1
+               for r in primary.values())
+    # The temperature-0 triplicate runs on the sample only, under its own grader.
+    assert len(sample) == 3 and set(sample) < set(primary)
+    assert all(r["judge_api_agreement"] is not None and r["judge_temperature"] == 0
+               for r in sample.values())
+    assert len(made[0].requests) == len(EPISODES) + 3 * 3
+    with Results(run["db"]) as results:
+        grade_run(run["run_id"], results)
+        assert results.episodes_graded_by(run["run_id"], STATE_GRADER) == set(primary)
+
+
+def test_the_api_agreement_metric_reads_the_dedicated_sample(run, monkeypatch):
+    from consequence.metrics import RunMetrics
+
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: TEST_JUDGES)
+    _cli_grade(run, "--judge-votes", "1", "--api-agreement-subset", "3")
+    with RunMetrics(run["db"], run["run_id"]) as m:
+        agreement = m.judge_api_agreement(TEST_JUDGE.id)
+    assert (agreement.n, agreement.no_verdict) == (3, 0)  # the sample, not the single votes
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--judge-votes", "2"], "must be odd"),
+    (["--api-agreement-subset", "2"], "needs --judge-votes 1"),
+    (["--judge-votes", "1", "--api-agreement-subset", "2", "--judge-temperature", "0.5"],
+     "full temperature-0 primary pass"),
+    (["--judge-stability-subset", "2", "--judge-votes", "1"], "always takes 3 votes"),
+])
+def test_vote_options_are_validated_before_any_call(run, capsys, monkeypatch, flags, message):
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: TEST_JUDGES)
+
+    def no_calls(model_id, registry=None, temperature=None):
+        raise AssertionError("a judge was built for an invalid command")
+
+    assert _cli_grade(run, *flags, factory=no_calls) == 2
+    assert message in capsys.readouterr().err
+    assert _rows(run["db"]) == {}
+
+
+def test_votes_must_be_odd(run):
+    with Results(run["db"]) as results, pytest.raises(JudgeConfigError, match="odd"):
+        _judge(results, run["run_id"], votes=2)
+
+
+# -- preflight: overflow counts without calling anything ------------------------------------
+
+
+def test_preflight_counts_overflows_and_calls_no_model(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+
+    with Results(tmp_path / "r.db") as results:
+        run_id = seed_run(results)
+        record_episode_with_state(results, run_id, task_id="001_void_duplicate")
+        huge = results.record_episode(run_id=run_id, task_id="001_void_duplicate",
+                                      model_id="mock", trial_index=1, status="completed")
+        results.record_transcript(huge, [
+            {"turn_index": 0, "role": "user", "content": "Void the duplicate invoice."},
+            {"turn_index": 1, "role": "tool", "tool_name": "query_invoices", "tool_args": {},
+             "tool_result": {"ok": True, "data": "x" * 1_000_000, "error": None}},
+        ])
+    unset = replace(SECOND_JUDGE, id="judge-unset", context_window_tokens=None)
+    monkeypatch.setattr("consequence.cli.load_judge_registry",
+                        lambda: {**TEST_JUDGES, unset.id: unset})
+
+    def no_calls(*args, **kwargs):
+        raise AssertionError("preflight built a judge")
+
+    rc = main(["--results-db", str(tmp_path / "r.db"), "grade", "--preflight", "--run",
+               str(run_id)], judge_provider_factory=no_calls)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"{TEST_JUDGE.id} (window 200000 tokens): 1 of 2 episode(s) would overflow" in out
+    assert "judge-unset: context_window_tokens not set" in out
+    with Results(tmp_path / "r.db") as results:  # and it wrote nothing
+        assert results._conn.execute("SELECT COUNT(*) FROM gradings").fetchone()[0] == 0
+
+
+def test_preflight_matches_what_judging_would_record(run):
+    """The preflight's count is the same check judge_episode makes."""
+    with Results(run["db"]) as results:
+        sizes = sorted(judge.estimate_tokens(build_messages(results.transcript_for_episode(i)))
+                       for i in run["ids"].values())
+        # A window between the smallest and largest episode, so it splits the run.
+        small = JudgeSpec(id="judge-small", provider="stub", api_model="s",
+                          input_price_per_million=1, output_price_per_million=1,
+                          context_window_tokens=sizes[0] + judge.JUDGE_OUTPUT_RESERVE_TOKENS,
+                          primary=True)
+        [check] = judge.preflight(results, run["run_id"], {small.id: small})
+        _, summary = _judge(results, run["run_id"], spec=small)
+    assert 0 < check.would_overflow < check.episodes  # the window splits the run
+    assert check.would_overflow == summary.judge_errors().get(CONTEXT_OVERFLOW, 0)
+
+
+def test_preflight_and_grade_flags_dont_mix(run, capsys):
+    rc = main(["--results-db", str(run["db"]), "grade", "--run", str(run["run_id"]),
+               "--preflight", "--grader", "llm_judge"])
+    assert rc == 2 and "--preflight grades nothing" in capsys.readouterr().err
+    rc = main(["--results-db", str(run["db"]), "grade", "--run", str(run["run_id"])])
+    assert rc == 2 and "--grader is required" in capsys.readouterr().err
+
+
 # -- E. a second judge from another family ----------------------------------------------------
 
 

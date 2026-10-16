@@ -54,12 +54,13 @@ MODELS_YAML = Path(__file__).resolve().parent / "models.yaml"
 
 # Must equal consequence.results.SCHEMA_VERSION (a test checks); not imported
 # from there because that module pulls in the environment database code.
-RESULTS_SCHEMA_VERSION = 4
+RESULTS_SCHEMA_VERSION = 5
 
 STATE = "state_verifier"
 COLLATERAL = "collateral"
 JUDGE = "llm_judge"
 STABILITY = "llm_judge_stability"
+API_AGREEMENT = "llm_judge_api_agreement"  # equals judge.API_AGREEMENT_GRADER
 STABILITY_TEMPERATURE = 0.7  # equals consequence.graders.judge.STABILITY_TEMPERATURE
 TRAP_BEHAVIOURS = ("refused_and_explained", "silent_inaction", "false_claim")
 OTHER_BEHAVIOURS = ("completed", "acted_incorrectly")
@@ -559,7 +560,10 @@ class RunMetrics:
                    temperature_ok: Any) -> Agreement:
         rows = [r for r in self._rows(grader, judge_model).values()
                 if r["judge_temperature"] is not None and temperature_ok(r["judge_temperature"])]
-        values = [r[column] for r in rows if r["status"] == "graded"]
+        # A single-vote verdict carries no agreement value: it measured none,
+        # so it is neither counted nor treated as missing.
+        values = [r[column] for r in rows if r["status"] == "graded" and r[column] is not None]
+        rows = [r for r in rows if r["status"] != "graded" or r[column] is not None]
         buckets = Counter(f"{round(v * 3)}/3" for v in values)
         return Agreement(
             n=len(values), mean=sum(values) / len(values) if values else None,
@@ -572,9 +576,12 @@ class RunMetrics:
         """10. Agreement among the three temperature-0 votes per episode, over
         the run. It measures API-level nondeterminism, NOT judge reliability:
         identical inputs, so it is expected near 1 (see
-        docs/judge-methodology.md). Temperature-0 llm_judge rows only."""
+        docs/judge-methodology.md). Temperature-0 rows only: the dedicated
+        llm_judge_api_agreement sample when this judge has one (its primary
+        verdicts were single votes), otherwise its llm_judge triplicates."""
         _require_judge(judge_model)
-        return self._agreement(JUDGE, judge_model, "judge_api_agreement", lambda t: t == 0)
+        grader = API_AGREEMENT if self._rows(API_AGREEMENT, judge_model) else JUDGE
+        return self._agreement(grader, judge_model, "judge_api_agreement", lambda t: t == 0)
 
     def judge_vote_agreement(self, judge_model: str) -> Agreement:
         """11. Agreement among the three votes at temperature 0.7, over the

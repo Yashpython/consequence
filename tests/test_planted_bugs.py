@@ -43,6 +43,19 @@ def test_measure_restores_the_file_even_if_the_suite_run_crashes(tmp_path, monke
     assert target.read_text(encoding="utf-8") == "x = 1\n"  # and is gone afterwards
 
 
+def test_a_red_baseline_plants_nothing_and_writes_nothing(monkeypatch, capsys):
+    """If the suites fail with no bug planted (Postgres down, say), every
+    count would be noise. The harness must stop before planting or writing."""
+    planted, written = [], []
+    monkeypatch.setattr(pb, "run_suite", lambda suite: SuiteResult(
+        failed=("tests/test_x.py::t",) if suite == "live" else (), passed=5))
+    monkeypatch.setattr(pb, "measure", lambda *a: planted.append(a))
+    monkeypatch.setattr(pb, "write_doc", lambda *a: written.append(a))
+    assert pb.main(["--write-doc"]) == 1
+    assert "baseline live suite is not green" in capsys.readouterr().err
+    assert (planted, written) == ([], [])
+
+
 def test_measure_refuses_an_anchor_that_does_not_match(tmp_path, monkeypatch):
     (tmp_path / "mod.py").write_text("y = 1\n", encoding="utf-8")
     monkeypatch.setattr(pb, "ROOT", tmp_path)

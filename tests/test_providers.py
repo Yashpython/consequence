@@ -2,11 +2,13 @@
 
 No network calls and none of the vendor SDKs need to be installed -- every
 adapter module imports its SDK lazily, only inside run_turn(). See the
-bottom of this file for the one opt-in @pytest.mark.smoke test per
-provider, which does need credentials and does spend real money.
+tests/test_smoke_providers.py for the opt-in @pytest.mark.smoke calls, which
+do need credentials and do spend real money.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 
@@ -14,7 +16,13 @@ from consequence.providers import anthropic as anthropic_adapter
 from consequence.providers import google as google_adapter
 from consequence.providers import openai as openai_adapter
 from consequence.providers import openrouter as openrouter_adapter
-from consequence.providers.registry import ModelSpec, compute_cost, load_model_registry
+from consequence.providers.registry import (
+    MODELS_YAML_PATH,
+    ModelSpec,
+    compute_cost,
+    load_judge_registry,
+    load_model_registry,
+)
 from consequence.tools.schema import TOOLS
 
 TOOL_NAMES = {t.name for t in TOOLS}
@@ -148,6 +156,24 @@ def test_temperature_is_sent_only_when_set(make):
     assert _temperature_in(make(temperature=0.7)) == 0.7
 
 
+# -- credentials: each adapter sends its own vendor's key -----------------------------
+
+
+def test_openrouter_never_sends_the_openai_key(monkeypatch):
+    """The openai SDK reads OPENAI_API_KEY when given no key; OpenRouter must
+    use OPENROUTER_API_KEY or refuse, never hand an OpenAI secret to a third
+    party."""
+    provider = openrouter_adapter.OpenRouterProvider(model_id="m", api_model="a/b")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="never falls back to OPENAI_API_KEY"):
+        provider._resolved_api_key()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-key")
+    assert provider._resolved_api_key() == "sk-or-key"
+    explicit = openrouter_adapter.OpenRouterProvider(model_id="m", api_model="a/b", api_key="k")
+    assert explicit._resolved_api_key() == "k"
+
+
 # -- cost calculation, unit-tested against known token counts and prices --
 
 
@@ -178,56 +204,69 @@ def test_compute_cost_unknown_model_is_none_not_a_guess():
     assert compute_cost("does-not-exist", 100, 100, registry={}) is None
 
 
+def floating_reason(provider: str, api_model: str) -> str | None:
+    """Why `api_model` is a moving alias rather than an immutable version, per
+    each vendor's documentation; None if it is pinned.
+
+    - Anthropic: "Every Claude model ID is a pinned snapshot, including the
+      dateless IDs used from the 4.6 generation on"; before that, the dateless
+      ID "is a convenience pointer that resolves to the dated ID"
+      (platform.claude.com/docs/en/about-claude/models/overview). So a dateless
+      ID is pinned only from 4.6 on; older ones need their -YYYYMMDD snapshot.
+    - OpenAI: snapshots "let you lock in a specific version of the model" and
+      are the -YYYY-MM-DD form; the bare family name is not one.
+    - Every vendor: anything containing "latest" is hot-swapped by definition.
+    """
+    if not api_model:
+        return "empty"
+    if "latest" in api_model.lower():
+        return "a 'latest' alias"
+    if provider == "anthropic" and not re.search(r"-\d{8}$", api_model):
+        version = re.match(r"claude-[a-z]+-(\d+)(?:-(\d+))?$", api_model)
+        if version is None:
+            return "not a recognised Claude model ID"
+        if (int(version.group(1)), int(version.group(2) or 0)) < (4, 6):
+            return "a dateless Claude ID before the 4.6 generation is an alias"
+    if provider == "openai" and not re.search(r"-\d{4}-\d{2}-\d{2}$", api_model):
+        return "not an OpenAI dated snapshot"
+    return None
+
+
+@pytest.mark.parametrize("provider, api_model, floating", [
+    ("anthropic", "claude-haiku-4-5", True),  # an alias for claude-haiku-4-5-20251001
+    ("anthropic", "claude-haiku-4-5-20251001", False),
+    ("anthropic", "claude-opus-5", False),  # dateless, but from 4.6 on: pinned
+    ("anthropic", "claude-opus-4-6", False),
+    ("anthropic", "claude-3-5-sonnet-latest", True),
+    ("openai", "gpt-5.1", True),
+    ("openai", "gpt-5.1-2025-11-13", False),
+    ("google", "gemini-2.5-flash-latest", True),
+])
+def test_the_floating_alias_rule_itself(provider, api_model, floating):
+    assert (floating_reason(provider, api_model) is not None) == floating
+
+
 def test_models_yaml_loads_five_models_with_pinned_non_floating_versions():
+    """Every api_model, in models: and judges:, is an immutable version."""
     registry = load_model_registry()
     assert len(registry) == 5
     providers = {spec.provider for spec in registry.values()}
     assert providers == {"anthropic", "openai", "google", "openrouter"}
-    for spec in registry.values():
-        assert spec.api_model  # non-empty
-        assert spec.api_model not in ("latest", "-latest")
-        assert "latest" not in spec.api_model.lower()
+    judges = load_judge_registry()
+    assert judges
+    for spec in [*registry.values(), *judges.values()]:
+        assert floating_reason(spec.provider, spec.api_model) is None, (
+            spec.id, spec.api_model, floating_reason(spec.provider, spec.api_model))
         assert spec.input_price_per_million > 0
         assert spec.output_price_per_million > 0
 
 
-# -- one opt-in, credentialed, real smoke test per provider ---------------
-# Skipped by default (pytest addopts excludes "smoke"); run explicitly with
-# `pytest -m smoke`. Each makes exactly one trivial, billed API call with no
-# tools, just to confirm credentials and wiring work end to end.
-
-
-@pytest.mark.smoke
-def test_anthropic_smoke():
-    from consequence.providers.anthropic import AnthropicProvider
-
-    provider = AnthropicProvider(model_id="claude-haiku-4.5", api_model="claude-haiku-4-5")
-    result = provider.run_turn([{"role": "user", "content": "Say 'ok'."}], tools=[])
-    assert result.text
-
-
-@pytest.mark.smoke
-def test_openai_smoke():
-    from consequence.providers.openai import OpenAIProvider
-
-    provider = OpenAIProvider(model_id="gpt-5.1", api_model="gpt-5.1-2025-11-13")
-    result = provider.run_turn([{"role": "user", "content": "Say 'ok'."}], tools=[])
-    assert result.text
-
-
-@pytest.mark.smoke
-def test_google_smoke():
-    from consequence.providers.google import GoogleProvider
-
-    provider = GoogleProvider(model_id="gemini-3.1-pro", api_model="gemini-3.1-pro-preview")
-    result = provider.run_turn([{"role": "user", "content": "Say 'ok'."}], tools=[])
-    assert result.text
-
-
-@pytest.mark.smoke
-def test_openrouter_smoke():
-    from consequence.providers.openrouter import OpenRouterProvider
-
-    provider = OpenRouterProvider(model_id="deepseek-v3.2", api_model="deepseek/deepseek-v3.2")
-    result = provider.run_turn([{"role": "user", "content": "Say 'ok'."}], tools=[])
-    assert result.text
+def test_every_judge_has_a_documented_context_window():
+    """Set from the vendor's page for that api_model, which models.yaml cites
+    beside the value; the judge refuses to run without one."""
+    text = MODELS_YAML_PATH.read_text(encoding="utf-8")
+    for spec in load_judge_registry().values():
+        assert isinstance(spec.context_window_tokens, int) and spec.context_window_tokens > 0
+        block = text[text.index(f"id: {spec.id}"):]
+        assert "context_window_tokens" in block and "https://" in block.split(
+            "context_window_tokens")[0], spec.id  # a URL precedes the value

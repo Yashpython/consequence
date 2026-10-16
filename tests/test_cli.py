@@ -60,7 +60,8 @@ def test_dry_run_single_task_prints_plan_and_makes_no_calls(db_path, capsys):
     assert "DRY RUN" in out
     assert "001_void_duplicate" in out
     assert "mock-1" in out
-    assert "estimated total cost" in out
+    assert "estimated experiment cost" in out
+    assert "estimated judging cost" in out and "estimated grand total" in out
 
     # nothing was persisted by a dry run
     with Results(db_path) as results:
@@ -134,9 +135,14 @@ def _rows(db_path):
         return results._conn.execute("SELECT COUNT(*) FROM gradings").fetchone()[0]
 
 
-def test_the_real_judges_refuse_to_run_until_their_context_window_is_set(db_path, capsys):
-    """models.yaml's judges have no context_window_tokens yet: the overflow
-    check can't work without one, so grading refuses and writes nothing."""
+def test_a_judge_without_a_context_window_refuses_to_run(db_path, capsys, monkeypatch):
+    """Without context_window_tokens the overflow check can't work, so
+    grading refuses and writes nothing. (models.yaml's judges now have theirs,
+    cited from vendor documentation; see test_providers.)"""
+    from dataclasses import replace
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: {
+        TEST_JUDGES["judge-test"].id: replace(TEST_JUDGES["judge-test"],
+                                              context_window_tokens=None)})
     run_id, _, _ = _seed_two_episodes(db_path)
     assert _grade(db_path, run_id, "--grader", "llm_judge") == 2
     assert "context_window_tokens" in capsys.readouterr().err
@@ -220,6 +226,69 @@ def test_judge_temperature_reaches_the_judge_provider(db_path, judges):
     with Results(db_path) as results:
         temps = {r[0] for r in results._conn.execute("SELECT judge_temperature FROM gradings")}
     assert temps == {0.3}
+
+
+# -- dry-run judging estimate ---------------------------------------------------------
+
+
+def _estimate(**kwargs):
+    from consequence.cli import (
+        DRY_RUN_ESTIMATED_INPUT_TOKENS,
+        DRY_RUN_ESTIMATED_JUDGE_OUTPUT_TOKENS,
+        DRY_RUN_ESTIMATED_OUTPUT_TOKENS,
+        estimate_costs,
+    )
+    from consequence.graders.judge import build_messages, estimate_tokens
+    from consequence.harness import Task
+    from consequence.providers.registry import ModelSpec
+
+    models = {"m": ModelSpec(id="m", provider="stub", api_model="m",
+                             input_price_per_million=1.0, output_price_per_million=2.0)}
+    combos = [(Task(task_id=f"t{i}", instructions="x"), "m", 0) for i in range(10)]
+    judge_in = DRY_RUN_ESTIMATED_INPUT_TOKENS + estimate_tokens(build_messages(()))
+    per_call = {j: (judge_in * s.input_price_per_million
+                    + DRY_RUN_ESTIMATED_JUDGE_OUTPUT_TOKENS * s.output_price_per_million) / 1e6
+                for j, s in TEST_JUDGES.items()}
+    episode = (DRY_RUN_ESTIMATED_INPUT_TOKENS * 1.0 + DRY_RUN_ESTIMATED_OUTPUT_TOKENS * 2.0) / 1e6
+    return estimate_costs(combos, models, TEST_JUDGES, **kwargs), per_call, episode
+
+
+def test_dry_run_estimates_experiment_judging_and_grand_totals():
+    est, per_call, episode = _estimate(judge_votes=1, api_agreement_subset=4,
+                                       stability_subset=3, cross_family_subset=2)
+    calls = {j["label"].split(" ")[0]: (j["episodes"], j["votes"], j["calls"])
+             for j in est["judging"]}
+    # The primary judge: one verdict for EVERY episode (parity), here one vote each.
+    assert calls["primary"] == (10, 1, 10)
+    assert calls["API-agreement"] == (4, 3, 12)
+    assert calls["stability"] == (3, 3, 9)
+    assert calls["cross-family"] == (2, 1, 2)
+    assert est["experiment_total"] == pytest.approx(10 * episode)
+    primary, second = per_call["judge-test"], per_call["judge-other-family"]
+    assert est["judging_total"] == pytest.approx((10 + 12 + 9) * primary + 2 * second)
+    assert est["grand_total"] == pytest.approx(est["experiment_total"] + est["judging_total"])
+
+
+def test_dry_run_subsets_cannot_exceed_the_episodes():
+    est, _, _ = _estimate(stability_subset=500, cross_family_subset=500)
+    assert {j["episodes"] for j in est["judging"] if "subset" in j["label"]
+            or "cross" in j["label"]} <= {0, 10}
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--judge-votes", "2"], "must be odd"),
+    (["--api-agreement-subset", "5"], "needs --judge-votes 1"),
+])
+def test_dry_run_judging_options_are_validated(db_path, capsys, flags, message):
+    rc = main(["--results-db", db_path, "run", "--task", "001_void_duplicate", "--model",
+               "mock-1", "--dry-run", *flags], provider_factory=_counting_factory([]))
+    assert rc == 2 and message in capsys.readouterr().err
+
+
+def test_judging_options_on_run_need_dry_run(db_path, capsys):
+    rc = main(["--results-db", db_path, "run", "--task", "001_void_duplicate", "--model",
+               "mock-1", "--cross-family-subset", "5"], provider_factory=_counting_factory([]))
+    assert rc == 2 and "only shape the --dry-run estimate" in capsys.readouterr().err
 
 
 # -- report / status ---------------------------------------------------

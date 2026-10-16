@@ -49,6 +49,10 @@ from consequence.results import Results
 
 JUDGE_GRADER = "llm_judge"
 STABILITY_GRADER = "llm_judge_stability"
+# The temperature-0 triplicate on a sample, when the primary verdicts are
+# single votes (`grade --judge-votes 1 --api-agreement-subset N`): kept under
+# its own grader so every episode still has exactly one llm_judge row.
+API_AGREEMENT_GRADER = "llm_judge_api_agreement"
 VOTES = 3
 STABILITY_TEMPERATURE = 0.7
 
@@ -102,7 +106,7 @@ class JudgeGrade:
     passed: bool | None
     behaviour: str | None
     confidence: float | None
-    agreement: float | None
+    agreement: float | None  # None for a single vote: there is nothing to agree
     error_reason: str | None
     input_tokens: int
     output_tokens: int
@@ -310,6 +314,39 @@ def judge_episode(provider: Provider, spec: JudgeSpec, turns: Sequence[dict[str,
     return outcome(status=GRADED, majority=majority(cast), votes=cast)
 
 
+@dataclass(frozen=True)
+class Preflight:
+    """Would this judge's context window hold each episode? No model called."""
+
+    judge_model: str
+    context_window_tokens: int | None  # None: not set, the judge can't run
+    episodes: int
+    would_overflow: int
+    missing_transcript: int
+
+
+def preflight(results: Results, run_id: int,
+              registry: dict[str, JudgeSpec]) -> list[Preflight]:
+    """For every judge, how many of the run's episodes would be recorded as
+    context_overflow: the same check judge_episode makes, without calling
+    anything. Builds no provider, so it needs no credentials."""
+    if results.get_run(run_id) is None:
+        raise JudgeConfigError(f"no run {run_id}")
+    sized = []
+    for episode in results.episodes_for_run(run_id):
+        turns = results.transcript_for_episode(episode["id"])
+        sized.append(None if task_instruction(turns) is None else build_messages(turns))
+    out = []
+    for spec in registry.values():
+        overflow = (None if spec.context_window_tokens is None
+                    else sum(m is not None and not fits(m, spec) for m in sized))
+        out.append(Preflight(judge_model=spec.id,
+                             context_window_tokens=spec.context_window_tokens,
+                             episodes=len(sized), would_overflow=overflow or 0,
+                             missing_transcript=sum(m is None for m in sized)))
+    return out
+
+
 def sample_episodes(results: Results, run_id: int, n: int, seed: int) -> list[int]:
     """n of the run's episodes, chosen reproducibly from `seed`."""
     ids = sorted(e["id"] for e in results.episodes_for_run(run_id))
@@ -335,8 +372,13 @@ def grade_run_with_judge(
     grades, whatever each episode's status -- or only `episode_ids`.
 
     `provider` must already be configured for `temperature`; the value is
-    recorded on every row so verdicts can be split by condition.
+    recorded on every row so verdicts can be split by condition. With
+    votes=1 the verdict is that one vote and no agreement is recorded: one
+    vote can't disagree with itself, and storing 1.0 would read as a
+    measurement.
     """
+    if votes < 1 or votes % 2 == 0:
+        raise JudgeConfigError(f"votes must be odd and at least 1, got {votes}")
     check_config(spec)
     if results.get_run(run_id) is None:
         raise JudgeConfigError(f"no run {run_id}")
@@ -360,14 +402,15 @@ def grade_run_with_judge(
                   "output_tokens": result["output_tokens"], "cost_usd": result["cost_usd"]}
         if result["status"] == GRADED:
             m: Majority = result["majority"]
+            agreement = m.agreement if votes > 1 else None
             results.record_judge_grading(
                 episode["id"], grader, spec.id, passed=m.passed, behaviour=m.behaviour,
-                confidence=m.confidence, temperature=temperature, agreement=m.agreement,
+                confidence=m.confidence, temperature=temperature, agreement=agreement,
                 detail_json={**base, "votes": [asdict(v) for v in result["votes"]]},
                 **common,
             )
             fields = {"status": GRADED, "passed": m.passed, "behaviour": m.behaviour,
-                      "confidence": m.confidence, "agreement": m.agreement,
+                      "confidence": m.confidence, "agreement": agreement,
                       "error_reason": None}
         else:
             results.record_judge_error(

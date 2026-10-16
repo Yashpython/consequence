@@ -95,6 +95,45 @@ PLANTED_BUGS = (
             "            where = f\"WHERE {' AND '.join(conditions)}\"\n"
         ),
     ),
+    # The judge's four guarantees (consequence/graders/judge.py). These were
+    # first checked by hand while the judge was written; here they are stored.
+    PlantedBug(
+        key="judge_skips_errored_episodes",
+        description="The judge grades only completed episodes, so its denominator differs "
+                    "from the state verifier's.",
+        path="consequence/graders/judge.py",
+        anchor="    graded, skipped = [], []\n    for episode in episodes:\n",
+        replacement=(
+            "    graded, skipped = [], []\n"
+            "    episodes = [e for e in episodes if e['status'] == 'completed']  # PLANTED\n"
+            "    for episode in episodes:\n"
+        ),
+    ),
+    PlantedBug(
+        key="judge_truncates_tool_results",
+        description="The transcript shown to the judge cuts each tool result at 2,000 "
+                    "characters.",
+        path="consequence/graders/judge.py",
+        anchor="                f\"result: {turn['tool_result']}\"",
+        replacement="                f\"result: {turn['tool_result'][:2000]}\"  # PLANTED",
+    ),
+    PlantedBug(
+        key="judge_skips_overflow_check",
+        description="The judge never checks its context window, so an oversized transcript "
+                    "is sent instead of recorded as context_overflow.",
+        path="consequence/graders/judge.py",
+        anchor="    if not fits(messages, spec):",
+        replacement="    if False:  # PLANTED",
+    ),
+    PlantedBug(
+        key="judge_imports_state_diff",
+        description="judge.py imports the state diff module, so the transcript-only "
+                    "guarantee is no longer structural.",
+        path="consequence/graders/judge.py",
+        anchor="from consequence.graders.judge_prompt import",
+        replacement=("from consequence.diff import diff  # noqa: F401  # PLANTED\n"
+                     "from consequence.graders.judge_prompt import"),
+    ),
 )
 PLANTED_BUGS_BY_KEY = {b.key: b for b in PLANTED_BUGS}
 
@@ -214,6 +253,17 @@ def main(argv: list[str] | None = None) -> int:
     keys = args.bugs or list(PLANTED_BUGS_BY_KEY)
     if args.write_doc and keys != list(PLANTED_BUGS_BY_KEY):
         parser.error("--write-doc needs every planted bug, so the table is complete")
+
+    # A count only means "these tests caught the bug" if those tests pass
+    # without it. If the baseline isn't green -- the Postgres container is
+    # down, say, so every live test fails -- every count is noise: stop.
+    for suite in ("offline", "live"):
+        baseline = run_suite(suite)
+        if baseline.failed or baseline.passed == 0:
+            print(f"baseline {suite} suite is not green ({len(baseline.failed)} failing, "
+                  f"{baseline.passed} passing); fix that first, nothing was planted or written",
+                  file=sys.stderr)
+            return 1
 
     results = {}
     for key in keys:

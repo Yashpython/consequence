@@ -36,7 +36,7 @@ DEFAULT_DB_PATH = "results/results.db"
 # Bump on any schema change. A results.db with a different version is refused
 # outright. There are no migrations: no real runs exist yet, so the remedy is
 # to delete the file and re-run.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class ResultsSchemaError(RuntimeError):
@@ -147,7 +147,9 @@ CREATE TABLE IF NOT EXISTS gradings (
     id                   INTEGER PRIMARY KEY,
     episode_id           INTEGER NOT NULL REFERENCES episodes (id),
     grader               TEXT NOT NULL CHECK (grader IN ('state_verifier', 'llm_judge',
-                                                         'llm_judge_stability', 'collateral')),
+                                                         'llm_judge_stability',
+                                                         'llm_judge_api_agreement',
+                                                         'collateral')),
     judge_model          TEXT NOT NULL DEFAULT '',
     status               TEXT NOT NULL
                          CHECK (status IN ('graded', 'grading_error', 'judge_error')),
@@ -172,7 +174,8 @@ CREATE TABLE IF NOT EXISTS gradings (
     CHECK (status != 'grading_error' OR error_traceback IS NOT NULL),
     CHECK (status != 'judge_error' OR error_reason IS NOT NULL),
     CHECK (status != 'graded' OR (error_traceback IS NULL AND error_reason IS NULL)),
-    CHECK ((grader IN ('llm_judge', 'llm_judge_stability')) = (judge_model != '')),
+    CHECK ((grader IN ('llm_judge', 'llm_judge_stability', 'llm_judge_api_agreement'))
+           = (judge_model != '')),
     CHECK (judge_api_agreement IS NULL OR judge_temperature = 0),
     CHECK (judge_vote_agreement IS NULL OR judge_temperature > 0)
 );
@@ -488,7 +491,7 @@ class Results:
         behaviour: str | None,
         confidence: float | None,
         temperature: float,
-        agreement: float,
+        agreement: float | None,
         input_tokens: int,
         output_tokens: int,
         cost_usd: float | None,
@@ -497,7 +500,8 @@ class Results:
         """A judge's majority verdict. `agreement` is stored as
         judge_api_agreement at temperature 0 and as judge_vote_agreement above
         it: the same arithmetic measures different things (see
-        docs/judge-methodology.md), so it never shares a column."""
+        docs/judge-methodology.md), so it never shares a column. It is None
+        for a single-vote verdict, which measures no agreement at all."""
         at_zero = temperature == 0
         return self._upsert_grading(
             episode_id, grader, judge_model, status="graded", passed=int(passed),

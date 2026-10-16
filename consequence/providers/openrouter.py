@@ -49,11 +49,27 @@ class OpenRouterProvider:
     temperature: float | None = None
     _client: Any = field(default=None, init=False, repr=False)
 
+    def _resolved_api_key(self) -> str:
+        """OPENROUTER_API_KEY, never OPENAI_API_KEY.
+
+        The openai SDK, given api_key=None, reads OPENAI_API_KEY from the
+        environment, which would send an OpenAI secret to openrouter.ai (and
+        fail auth there). So the key is resolved here and must be present.
+        """
+        from consequence.config import load_config
+
+        key = self.api_key or load_config().openrouter_api_key
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set; the OpenRouter adapter never "
+                               "falls back to OPENAI_API_KEY")
+        return key
+
     def _get_client(self) -> Any:
         if self._client is None:
             import openai
 
-            self._client = openai.OpenAI(api_key=self.api_key, base_url=OPENROUTER_BASE_URL)
+            self._client = openai.OpenAI(api_key=self._resolved_api_key(),
+                                         base_url=OPENROUTER_BASE_URL)
         return self._client
 
     def _request(self, messages: list[dict[str, Any]], tools: Sequence[ToolDef]) -> dict[str, Any]:

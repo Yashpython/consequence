@@ -180,7 +180,7 @@ for _strategy_name in ("do_nothing", "claim_without_acting", "opposite",
         FACTS[f"adversarial.{_strategy_name}.{_column}"] = _strategy(_strategy_name, _column)
 FACTS["dependencies.count"] = lambda: str(len(_dependencies()))
 FACTS["dependencies.pinned_exactly"] = lambda: str(sum("==" in d for d in _dependencies()))
-for _key in ("reads_live_environment", "skips_errored_episodes", "substring_supplier_filter"):
+for _key in (__import__("consequence.planted_bugs", fromlist=["x"]).PLANTED_BUGS_BY_KEY):
     for _suite in ("offline", "live"):
         FACTS[f"planted.{_key}.{_suite}"] = _planted(_key, _suite)
 

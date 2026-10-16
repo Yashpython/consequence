@@ -43,9 +43,9 @@ adapters for Anthropic, OpenAI, Google and OpenRouter.
 | Providers in the registry | 4 <!-- fact:providers.count --> | MEASURED | `provider` field in `consequence/models.yaml` |
 | Trials per (task, model) in the experiment | NOT YET MEASURED | NOT YET MEASURED | Not fixed yet: `consequence run --trials` defaults to one. Set by the first real run. |
 | Total episodes run against real models | NOT YET MEASURED | NOT YET MEASURED | `consequence status` after the first real run. No real run exists. |
-| Offline tests | 628 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
+| Offline tests | 658 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
 | Live tests (real Postgres) | 332 <!-- fact:tests.live --> | MEASURED | `pytest --collect-only -q -m live` |
-| Smoke tests (one billed API call each) | 4 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`. Never run; see section 9. |
+| Smoke tests (one billed API call each) | 9 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`: each judge at temperature 0 and 0.7, each model under test one tool-calling turn. Never run; see section 9. |
 | Adversarial strategies | 6 <!-- fact:adversarial.strategies --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
 | Adversarial attacks (strategies x tasks) | 150 <!-- fact:adversarial.attempted --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
 | CI jobs | 2 <!-- fact:ci.jobs --> | MEASURED | `.github/workflows/ci.yml` (`check`, `live`) |
@@ -133,7 +133,10 @@ marked blocks, never copied.
   self-consistency. See `docs/judge-methodology.md`.
 - **Formula:** per episode, share of votes on the modal (passed, behaviour)
   pair; reported as its distribution (3/3, 2/3, 1/3), its mean, and the
-  unanimous share with a Wilson interval. Temperature-0 rows only.
+  unanimous share with a Wilson interval. Temperature-0 rows only: the
+  dedicated `llm_judge_api_agreement` sample when the primary verdicts were
+  single votes (`--judge-votes 1 --api-agreement-subset N`), otherwise the
+  primary triplicates. A single vote records no agreement.
 - **Value:** NOT YET MEASURED
 - **Will come from:** the live judging commit.
 - **Regenerate:** `RunMetrics(db, run).judge_api_agreement(judge_model)`.
@@ -254,6 +257,8 @@ marked blocks, never copied.
 | A sensitivity bound for episodes with no verdict | A grading or judge error is neither a pass nor a fail, so it can't be counted; but silently dropping it can bias the rate, and the dropped episodes may not be random | `consequence/metrics.py`: every rate returns `no_verdict` and `ungraded` counts beside n, and `verification_gap` returns `bound_low_pp` / `bound_high_pp`, the gap recomputed with every missing verdict at each extreme | A headline gap that hides how much it depends on episodes nobody could grade |
 | All reported numbers come from one read-only module | One definition per number, and no way for reporting code to change the record | `consequence/metrics.py` opens `results.db` read-only and imports only the standard library and yaml; a test imports it in a fresh interpreter to prove it loads no model, environment or seed code | Two places computing the same number differently; a metric that quietly writes or calls a model |
 | The report computes nothing | A report that does its own counting is a second definition of every number, and the old one pooled models together | `consequence/report.py` only calls `RunMetrics` and formats; `tests/test_report.py` parses it and rejects arithmetic operators, counting builtins and direct DB access, checks every figure equals the metrics' own, and checks it imports nothing but `consequence.metrics` | A report figure that disagrees with the metric it claims to show; results pooled across models |
+| Vendor-documented model configuration | A floating alias or a remembered context window would make the run unrepeatable or let a transcript overflow silently | Every `api_model` passes a vendor-specific pinned-version rule in `tests/test_providers.py` (a planted alias fails it); every judge context window is cited to the vendor's page in `models.yaml` and must be set or the judge refuses to run | An evaluated model silently upgraded mid-study; an overflow check built on a guessed number |
+| A planted-bug harness that refuses a red baseline | A count of "tests that caught the bug" is only meaningful if those tests pass without it | `consequence/planted_bugs.py` runs both suites unchanged first and stops without planting or writing if either has a failure | Publishing noise as validation, as happened once with the database down |
 | Two notions of success kept apart | An episode that crashed after the right write must still fail, but that fact is worth reporting | `gradings.passed` vs `gradings.verifier_verdict_raw`; `status = 'grading_error'` for a verifier that raises | Crashes counted as passes; verifier bugs counted as agent failures |
 
 How I would say each one out loud:
@@ -304,6 +309,13 @@ How I would say each one out loud:
   module returns; a test reads the report's own source and fails if it finds
   any arithmetic or counting. So there is exactly one definition of every
   number, and the report can't drift from it.
+- **Vendor-documented configuration.** Every model version is checked against
+  the vendor's own rule for what counts as a pinned version, and every judge
+  context window carries a link to the page it came from. That check found
+  one of the models under test pinned to an alias.
+- **A harness that checks itself.** My bug-planting harness runs the suites
+  clean first and refuses to measure if anything already fails, because a
+  database outage once made every planted bug look caught by every test.
 - **Two notions of success.** If an agent makes the right write and then
   crashes, the episode fails, but I keep the verifier's raw verdict for
   analysis. If the verifier itself crashes, that's recorded as a grading
@@ -464,6 +476,53 @@ How I would say each one out loud:
   models stay apart; planting the pooling back made report and CLI tests
   fail (checked by hand; the run's output isn't stored).
 
+### 5.11 A model under test was pinned to a moving alias
+
+- **What was wrong:** `models.yaml` pinned Claude Haiku 4.5 as
+  `claude-haiku-4-5`, which Anthropic documents as "a convenience alias that
+  resolves to the pinned snapshot claude-haiku-4-5-20251001". The test meant
+  to catch floating versions only rejected the word "latest".
+- **How it was discovered:** checking every `api_model` against vendor
+  documentation before the real run. Anthropic's rule: dateless IDs are
+  pinned only from the 4.6 generation on.
+- **Mechanism:** the naming convention changed across generations, so a
+  dateless ID is a pin for newer models and an alias for older ones; a
+  string check can't tell them apart without the vendor's rule.
+- **Fix:** uncommitted at time of writing. Pinned to
+  `claude-haiku-4-5-20251001`, with the source cited in `models.yaml`; the
+  test now encodes each vendor's documented rule and covers judges too.
+- **How it was proven:** the rule has its own tests, including the old alias,
+  which it flags.
+
+### 5.12 The OpenRouter adapter would have sent the OpenAI key
+
+- **What was wrong:** given no key, the OpenRouter adapter let the `openai`
+  SDK pick one, and that SDK reads `OPENAI_API_KEY`. The open-weights run
+  would have sent the OpenAI secret to openrouter.ai, and failed there.
+- **How it was discovered:** tracing how each smoke test would find its
+  credentials.
+- **Mechanism:** OpenRouter is reached through the OpenAI SDK pointed at a
+  different base URL; the SDK's credential default belongs to the original
+  vendor.
+- **Fix:** uncommitted at time of writing. The adapter resolves
+  `OPENROUTER_API_KEY` itself and refuses to run without it.
+- **How it was proven:** `test_openrouter_never_sends_the_openai_key` sets
+  only `OPENAI_API_KEY` and asserts the adapter refuses.
+
+### 5.13 The planted-bug harness measured noise with the database down
+
+- **What was wrong:** a measurement run with the Postgres container stopped
+  reported every planted bug as failing every live test.
+- **How it was discovered:** the result was implausible: a bug in the judge,
+  which no live test touches, can't fail every live test.
+- **Mechanism:** the harness counted failures with the bug planted but never
+  checked the suites passed without it; every live test failed for lack of a
+  database.
+- **Fix:** uncommitted at time of writing. The harness runs both suites
+  unchanged first and stops, planting and writing nothing, if either fails.
+- **How it was proven:** `test_a_red_baseline_plants_nothing_and_writes_nothing`;
+  the table was then regenerated with the database up.
+
 ## 6. Evidence that the work validates itself
 
 ### Adversarial verifier audit
@@ -482,18 +541,24 @@ Cited from `docs/reward-hacking-log.md`, block `adversarial:summary`, which
 ### Planted-bug validation
 
 Cited from `docs/methodology.md`, block `planted-bugs`, which `python -m
-consequence.planted_bugs --write-doc` regenerates. Each count is failing
-tests with the bug planted; the totals and the commit they were measured at
-are in that block.
+consequence.planted_bugs --write-doc` regenerates, only after both suites
+pass unchanged. Each count is failing tests with the bug planted; the totals
+and the commit they were measured at are in that block. The judge is tested
+offline only (stubbed judge providers), so its bugs fail no live test by
+design.
 
 | Fact | Value | Status | Source |
 |---|---|---|---|
-| Grader reads the live environment: offline tests failing | 24 <!-- fact:planted.reads_live_environment.offline --> | MEASURED | `planted-bugs` |
+| Grader reads the live environment: offline tests failing | 25 <!-- fact:planted.reads_live_environment.offline --> | MEASURED | `planted-bugs` |
 | Grader reads the live environment: live tests failing | 1 <!-- fact:planted.reads_live_environment.live --> | MEASURED | `planted-bugs` |
-| Grader skips errored episodes: offline tests failing | 13 <!-- fact:planted.skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
+| Grader skips errored episodes: offline tests failing | 14 <!-- fact:planted.skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
 | Grader skips errored episodes: live tests failing | 1 <!-- fact:planted.skips_errored_episodes.live --> | MEASURED | `planted-bugs` |
 | Old substring supplier filter: offline tests failing | 0 <!-- fact:planted.substring_supplier_filter.offline --> | MEASURED | `planted-bugs` |
 | Old substring supplier filter: live tests failing | 5 <!-- fact:planted.substring_supplier_filter.live --> | MEASURED | `planted-bugs` |
+| Judge skips errored episodes: offline tests failing | 10 <!-- fact:planted.judge_skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
+| Judge truncates tool results: offline tests failing | 3 <!-- fact:planted.judge_truncates_tool_results.offline --> | MEASURED | `planted-bugs` |
+| Judge skips the overflow check: offline tests failing | 2 <!-- fact:planted.judge_skips_overflow_check.offline --> | MEASURED | `planted-bugs` |
+| Judge imports the state diff: offline tests failing | 1 <!-- fact:planted.judge_imports_state_diff.offline --> | MEASURED | `planted-bugs` |
 | Manual spot-check agreement with the failure taxonomy | NOT YET MEASURED | NOT YET MEASURED | Needs `docs/failure-taxonomy.md` |
 
 ### CI
@@ -529,8 +594,8 @@ something not yet measured.
 - **READY** Hardened 25 <!-- fact:verifiers.count --> state-based verifiers against reward hacking, closing 27 <!-- fact:adversarial.closed --> of the 39 <!-- fact:adversarial.succeeded_at_baseline --> attacks that beat them, by running 150 <!-- fact:adversarial.attempted --> scripted adversarial agents across 6 <!-- fact:adversarial.strategies --> cheating strategies.
 - **READY** Caught a write-then-revert exploit that passed all 25 <!-- fact:adversarial.transient_write.succeeded_at_baseline --> verifiers, by adding an audit-trail check that every verifier inherits centrally.
 - **READY** Found and fixed a tool-layer bug where a single wildcard character in model input returned every supplier's records, proven by restoring the old filter and watching 5 <!-- fact:planted.substring_supplier_filter.live --> new tests fail.
-- **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 24 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
-- **READY** Built a test suite of 628 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
+- **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 25 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
+- **READY** Built a test suite of 658 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
 - **DRAFT** Measured how often agents claim success the database contradicts (verification gap: NOT YET MEASURED) across the registry's models, by grading final state instead of transcripts.
 - **DRAFT** Showed the difference between one-shot and every-time reliability (pass@1 vs pass^k: NOT YET MEASURED), by running repeated trials per task and model.
 - **DRAFT** Quantified collateral damage (rate: NOT YET MEASURED) by classifying every out-of-scope row change as benign or destructive.
@@ -564,12 +629,17 @@ something not yet measured.
   stability subset speaks to reliability.
 - **"Self-preference bias is handled."** The cross-family judge is a design
   that can measure it; nothing has been measured.
-- **Judge context windows.** `context_window_tokens` is unset for both
-  judges; the judge refuses to run until it is set from vendor documentation.
-- **Mutation checks on the judge tests.** Four bugs were planted in
-  `judge.py` by hand while it was written, and each was caught, but the
-  outputs aren't stored. Add them to `consequence/planted_bugs.py` before
-  citing a count.
+- **"Every model ID and context window is verified."** They are taken from
+  vendor documentation, checked 2026-10-14 and cited in `models.yaml`; no
+  call has confirmed them yet (the smoke suite is unrun). Gemini's
+  `gemini-3.1-pro-preview` has no dated variant, and Google doesn't say
+  whether a preview code can change.
+- **"Both judges run at temperature 0 and 0.7."** Unverified for GPT-5.1:
+  OpenAI's model page is silent on sampling parameters, and community reports
+  say GPT-5-series reasoning models reject `temperature`.
+- **Claude Haiku 4.5 in the final results, unchecked.** Anthropic lists it as
+  legacy, retirement "Not sooner than October 15, 2026". Confirm it is still
+  served before the run, and say if it was swapped.
 - **The failure taxonomy.** It doesn't exist.
 - **A verification gap without its n and sensitivity bound.** When any
   episode lacks a verdict, the paired gap alone can mislead: in the metrics
@@ -589,6 +659,7 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | uncommitted pre-experiment work | Pinned Claude Haiku 4.5 to its dated snapshot and set both judge context windows from cited vendor pages; the smoke suite now covers each judge at both temperatures and each model with tools; the four judge mutations are stored in the planted-bug table; single-vote judging with an API-agreement sample, dry-run judging estimates and an overflow preflight. Added defects 5.11 (a floating alias), 5.12 (the OpenRouter key) and 5.13 (planted bugs measured against a red baseline), two engineering decisions, the 3.6 source rule, and replaced two section 9 guards with three current ones. |
 | 2026-10-13 | uncommitted report work | `consequence/report.py` now lays out `consequence/metrics.py` per model and computes nothing; added the judging cost (3.13) and episode outcome (3.14) definitions, two metrics behind them, the "report computes nothing" engineering decision, and defect 5.10 (the old report pooled every model). Metric count 15 to 17. |
 | 2026-10-13 | uncommitted metrics work | Added `consequence/metrics.py` as the only source of reported numbers. Rewrote section 3 so every definition matches the code and names its `RunMetrics` call: new definitions for the trap behaviour split (3.10), cross-judge agreement over the intersection (3.8) and grading coverage (3.11), plus time and turns (3.12). Corrected three earlier definitions to match the metrics as specified: the verification gap is a difference in percentage points, not a share of judge passes; collateral is over state passes only; cost per solved task is per category, traps included. Added the no-verdict sensitivity bound and the single metrics module to section 4, a scale fact, and section 9 guards. |
 | 2026-10-11 | uncommitted judge work | Added the LLM judge: scale facts (judge models), section 3 definitions for the verification gap, judge API agreement, stability, cross-family comparison and the new 3.10 trap behaviour split, three engineering decisions, the reframed adversarial row (structural limits), a DRAFT bullet, and section 9 guards. Corrected 3.6, which wrongly defined judge API agreement as judge-vs-state agreement. |

@@ -198,9 +198,16 @@ reason `context_overflow`, the judge is never called, and the count appears
 in the grading summary and the CLI output. The pessimism errs toward a
 counted overflow over a request that is cut or rejected.
 
-`context_window_tokens` is `null` for both judges in `models.yaml`: it must be
-set from each vendor's documentation for the exact `api_model`, and the judge
-refuses to run until it is.
+`context_window_tokens` comes from each vendor's documentation for the exact
+`api_model`, cited beside the value in `models.yaml` (checked 2026-10-14):
+1,000,000 for `claude-opus-5` ("Context window: 1M tokens") and 400,000 for
+`gpt-5.1-2025-11-13` ("400,000 context window"). The judge refuses to run
+while a judge's window is unset.
+
+**Preflight.** `consequence grade --preflight --run N` reports, for every
+judge, how many of the run's episodes would be recorded as
+`context_overflow`. It is the same check judging makes, it builds no judge
+provider and calls no model, and it writes nothing.
 
 ## Failures and cost
 
@@ -209,8 +216,25 @@ one valid `record_verdict` call, `provider_error` with the traceback when the
 call fails, `missing_transcript`) is neither a pass nor a fail. It is
 excluded from pass counts, counted in the summary and in `consequence
 report`, makes `grade` exit non-zero, and is retried by the next `grade`. A
-verdict needs all three votes; a partial triplicate is an error, not a
+verdict needs every vote it was asked for; a partial set is an error, not a
 verdict from fewer votes.
+
+## One vote per episode, the triplicate on a sample
+
+To cut judging cost, `grade --grader llm_judge --judge-votes 1
+--api-agreement-subset N` gives every episode exactly one primary verdict,
+from one temperature-0 vote, and runs the three-vote temperature-0
+triplicate only on N episodes sampled reproducibly (`--judge-sample-seed`).
+The triplicates are stored under their own grader, `llm_judge_api_agreement`,
+so each episode still has exactly one `llm_judge` row and the primary judge
+still covers exactly the state verifier's episodes. A single-vote verdict
+records no agreement value at all: one vote cannot disagree with itself, and
+storing "1 of 1" would read as a measurement. `judge_api_agreement` then
+reads the sample. `--judge-votes` must be odd; the sample only goes with
+`--judge-votes 1`, at temperature 0. `consequence run --all --dry-run` takes
+the same options (plus `--judge-stability-subset` and
+`--cross-family-subset`) and prints the experiment, judging and grand-total
+cost estimates separately.
 
 Judging cost is tracked apart from the experiment's: every judge row records
 its input and output tokens and `judge_cost_usd` (all three votes, including
@@ -220,13 +244,20 @@ votes spent before an error), from the judge's pinned prices.
 
 ## Before the first live judging run
 
-- Set `context_window_tokens` for each judge from the vendor's documentation.
-- Confirm each judge's `api_model` and prices, as for the models under test
-  (`docs/models.md`).
-- Confirm each judge model accepts a `temperature` parameter at 0 and 0.7.
-  The adapters send it when set; a model that rejects it will produce
-  `provider_error` rows, not silently ignore it.
-- Run one smoke judgement per judge before grading a full run.
+- Done: `context_window_tokens` set for both judges from vendor documentation;
+  both `api_model`s confirmed as pinned versions (the Claude ID is dateless
+  but pinned from the 4.6 generation on; the OpenAI one is a dated snapshot).
+- Run the smoke suite: `pip install -e ".[dev,providers]"`, then
+  `pytest -m smoke -rf`. It calls each judge once at temperature 0 and once
+  at 0.7 and checks the forced `record_verdict` call parses, and gives each
+  model under test one real turn with tools attached.
+- **Open risk: GPT-5.1 and temperature.** OpenAI's GPT-5.1 page says nothing
+  about sampling parameters, and community reports say GPT-5-series
+  reasoning models reject `temperature` (one reports an HTTP 400). If
+  `judge-gpt-5.1` rejects it, its smoke tests fail and its judging rows would
+  be `provider_error`, never silently run at a default temperature. The
+  cross-family judge would then need a model that accepts a temperature.
+- Run `consequence grade --preflight --run N` on the real run before judging.
 
 ## Measurements this enables
 

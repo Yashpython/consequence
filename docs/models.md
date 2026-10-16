@@ -24,7 +24,7 @@ not five variations on one tier:
   model and a snapshot is a harder pin than a family name. $1.25 / $10.00
   per 1M.
 
-- **`gemini-3.1-pro`** (Google, frontier-tier) -- the third first-party lab,
+- **`gemini-3.1-pro`** (Google, frontier-tier; api_model `gemini-3.1-pro-preview`, the only code Google lists for it, with no dated variant; Google's models page doesn't say whether a preview code can change, checked 2026-10-14) -- the third first-party lab,
   and Gemini's tool-calling shape (`function_declarations`, "model" role
   instead of "assistant", no separate tool role) is different enough from
   the other two that it genuinely exercises the adapter interface rather
@@ -40,7 +40,12 @@ not five variations on one tier:
   alongside frontier behavior. Reusing Anthropic here (rather than a fourth
   vendor) was deliberate: it isolates the small/cheap effect from a
   vendor-family effect, since `claude-opus-5` is also Anthropic. $1.00 /
-  $5.00 per 1M.
+  $5.00 per 1M. Pinned to the dated snapshot `claude-haiku-4-5-20251001`:
+  before the 4.6 generation, Anthropic's dateless `claude-haiku-4-5` is an
+  alias that resolves to it, not a pin (checked 2026-10-14,
+  https://platform.claude.com/docs/en/models/haiku-4-5/overview). The same
+  page lists Claude Haiku 4.5 as legacy, retirement "Not sooner than October
+  15, 2026": confirm it is still served before the real run.
 
 - **`deepseek-v3.2`** (open-weights, via OpenRouter) -- the open-weights
   representative, so the lineup isn't all closed frontier labs. Routed
