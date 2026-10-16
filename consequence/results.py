@@ -36,7 +36,7 @@ DEFAULT_DB_PATH = "results/results.db"
 # Bump on any schema change. A results.db with a different version is refused
 # outright. There are no migrations: no real runs exist yet, so the remedy is
 # to delete the file and re-run.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class ResultsSchemaError(RuntimeError):
@@ -82,7 +82,11 @@ CREATE TABLE IF NOT EXISTS episodes (
     cost_usd      REAL,
     latency_ms    INTEGER,
     turn_count    INTEGER,
-    retry_count   INTEGER
+    retry_count   INTEGER,
+    -- What actually served the episode's calls, from each response (the
+    -- adapters' served_model_from_raw), comma-joined if they differed. It can
+    -- differ from the configured api_model; see metrics.served_models.
+    served_model  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transcripts (
@@ -165,6 +169,7 @@ CREATE TABLE IF NOT EXISTS gradings (
     judge_input_tokens   INTEGER,
     judge_output_tokens  INTEGER,
     judge_cost_usd       REAL,
+    served_model         TEXT,  -- the judge model that served the votes
     error_reason         TEXT,
     error_traceback      TEXT,
     detail_json          TEXT,
@@ -319,6 +324,7 @@ class Results:
         latency_ms: int | None = None,
         turn_count: int | None = None,
         retry_count: int | None = None,
+        served_model: str | None = None,
     ) -> int:
         with self._conn:
             cur = self._conn.execute(
@@ -326,8 +332,8 @@ class Results:
                 INSERT INTO episodes (
                     run_id, task_id, model_id, trial_index, started_at, finished_at,
                     status, error, input_tokens, output_tokens, cost_usd, latency_ms,
-                    turn_count, retry_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    turn_count, retry_count, served_model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -344,6 +350,7 @@ class Results:
                     latency_ms,
                     turn_count,
                     retry_count,
+                    served_model,
                 ),
             )
         assert cur.lastrowid is not None
@@ -496,6 +503,7 @@ class Results:
         output_tokens: int,
         cost_usd: float | None,
         detail_json: Any = None,
+        served_model: str | None = None,
     ) -> int:
         """A judge's majority verdict. `agreement` is stored as
         judge_api_agreement at temperature 0 and as judge_vote_agreement above
@@ -509,7 +517,8 @@ class Results:
             judge_api_agreement=agreement if at_zero else None,
             judge_vote_agreement=None if at_zero else agreement,
             judge_input_tokens=input_tokens, judge_output_tokens=output_tokens,
-            judge_cost_usd=cost_usd, detail_json=_json(detail_json),
+            judge_cost_usd=cost_usd, served_model=served_model,
+            detail_json=_json(detail_json),
         )
 
     def record_judge_error(
@@ -525,6 +534,7 @@ class Results:
         cost_usd: float | None = 0.0,
         error_traceback: str | None = None,
         detail_json: Any = None,
+        served_model: str | None = None,
     ) -> int:
         """The judge rendered no verdict. Tokens already spent are still
         recorded, so judging cost is complete even when judging fails."""
@@ -532,13 +542,15 @@ class Results:
             episode_id, grader, judge_model, status="judge_error", error_reason=reason,
             error_traceback=error_traceback, judge_temperature=temperature,
             judge_input_tokens=input_tokens, judge_output_tokens=output_tokens,
-            judge_cost_usd=cost_usd, detail_json=_json(detail_json),
+            judge_cost_usd=cost_usd, served_model=served_model,
+            detail_json=_json(detail_json),
         )
 
     _GRADING_COLUMNS = (
         "status", "passed", "verifier_verdict_raw", "behaviour", "confidence",
         "judge_temperature", "judge_api_agreement", "judge_vote_agreement",
-        "judge_input_tokens", "judge_output_tokens", "judge_cost_usd", "error_reason",
+        "judge_input_tokens", "judge_output_tokens", "judge_cost_usd", "served_model",
+        "error_reason",
         "error_traceback", "detail_json", "graded_at",
     )
 

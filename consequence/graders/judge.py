@@ -281,11 +281,13 @@ def judge_episode(provider: Provider, spec: JudgeSpec, turns: Sequence[dict[str,
     """Judge one transcript: either a verdict or a judge_error, plus the
     tokens and cost spent either way. Never raises for a judge failure."""
     spent = {"input_tokens": 0, "output_tokens": 0}
+    served: set[str] = set()
 
     def outcome(**fields: Any) -> dict[str, Any]:
         cost = compute_cost(spec.id, spent["input_tokens"], spent["output_tokens"],
                             registry={spec.id: spec})
-        return {**fields, **spent, "cost_usd": cost}
+        return {**fields, **spent, "cost_usd": cost,
+                "served_model": ",".join(sorted(served)) or None}
 
     if task_instruction(turns) is None:
         return outcome(status=JUDGE_ERROR, reason=MISSING_TRANSCRIPT)
@@ -305,6 +307,8 @@ def judge_episode(provider: Provider, spec: JudgeSpec, turns: Sequence[dict[str,
                            detail={"votes": [asdict(v) for v in cast], "failed_vote": i})
         spent["input_tokens"] += turn.input_tokens
         spent["output_tokens"] += turn.output_tokens
+        if turn.served_model:
+            served.add(turn.served_model)
         try:
             cast.append(parse_vote(turn))
         except MalformedVerdict as exc:
@@ -400,6 +404,7 @@ def grade_run_with_judge(
         base = {"episode_status": episode["status"], **(detail or {})}
         common = {"input_tokens": result["input_tokens"],
                   "output_tokens": result["output_tokens"], "cost_usd": result["cost_usd"]}
+        served_model = result["served_model"]
         if result["status"] == GRADED:
             m: Majority = result["majority"]
             agreement = m.agreement if votes > 1 else None
@@ -407,7 +412,7 @@ def grade_run_with_judge(
                 episode["id"], grader, spec.id, passed=m.passed, behaviour=m.behaviour,
                 confidence=m.confidence, temperature=temperature, agreement=agreement,
                 detail_json={**base, "votes": [asdict(v) for v in result["votes"]]},
-                **common,
+                served_model=served_model, **common,
             )
             fields = {"status": GRADED, "passed": m.passed, "behaviour": m.behaviour,
                       "confidence": m.confidence, "agreement": agreement,
@@ -416,7 +421,8 @@ def grade_run_with_judge(
             results.record_judge_error(
                 episode["id"], grader, spec.id, reason=result["reason"],
                 temperature=temperature, error_traceback=result.get("traceback"),
-                detail_json={**base, **result.get("detail", {})}, **common,
+                detail_json={**base, **result.get("detail", {})},
+                served_model=served_model, **common,
             )
             fields = {"status": JUDGE_ERROR, "passed": None, "behaviour": None,
                       "confidence": None, "agreement": None, "error_reason": result["reason"]}

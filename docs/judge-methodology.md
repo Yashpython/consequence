@@ -160,16 +160,25 @@ by exact `api_model`, priced, and identified on every grading row
 (`judge_model`), so verdicts always split by judge and two judges are never
 blended in a report.
 
-- **Primary judge:** `judge-claude-opus-5` (`claude-opus-5`). It grades every
-  episode.
+- **Primary judge:** `judge-claude-opus-4.6` (`claude-opus-4-6`). It grades
+  every episode. It is not the newest Claude model on purpose: Anthropic
+  documents that on Claude Opus 4.7 and later (Opus 5 and 5.5 included)
+  "non-default `temperature`, `top_p`, or `top_k` values return a 400 error on
+  every request, regardless of whether thinking is used", which rules out the
+  temperature-0 votes and the 0.7 stability subset. Opus 4.6 accepts a
+  temperature while thinking is off, its default, which the adapter never
+  changes (https://platform.claude.com/docs/en/build-with-claude/thinking).
+  Every judge row records the model that actually served its votes
+  (`served_model`).
 - **Cross-family judge:** `judge-gpt-5.1` (`gpt-5.1-2025-11-13`). Run with
   `--judge-model judge-gpt-5.1 --judge-subset N` on a reproducible sample.
   Only non-primary judges may grade a subset, so the primary judge's verdicts
   always cover the state verifier's episodes exactly.
 
 **Self-preference risk.** The primary judge is an Anthropic model, the same
-family as two of the models under test, and the same model as one of them
-(`claude-opus-5`). The LLM-as-judge literature reports that judges can favour
+family as one model under test (`claude-opus-5.5`); it was two until the small
+model became `gemini-3.5-flash-lite` in place of Claude Haiku 4.5. It is no
+longer the same model as any model under test. The LLM-as-judge literature reports that judges can favour
 outputs from their own model or family (for example the "self-enhancement
 bias" discussed by Zheng et al., 2023, in the MT-Bench work). The
 cross-family judge is the mitigation: comparing the two judges' verdicts on
@@ -199,9 +208,10 @@ in the grading summary and the CLI output. The pessimism errs toward a
 counted overflow over a request that is cut or rejected.
 
 `context_window_tokens` comes from each vendor's documentation for the exact
-`api_model`, cited beside the value in `models.yaml` (checked 2026-10-14):
-1,000,000 for `claude-opus-5` ("Context window: 1M tokens") and 400,000 for
-`gpt-5.1-2025-11-13` ("400,000 context window"). The judge refuses to run
+`api_model`, cited beside the value in `models.yaml`: 1,000,000 for
+`claude-opus-4-6` ("Context window: 1M tokens", checked 2026-10-15) and
+400,000 for `gpt-5.1-2025-11-13` ("400,000 context window", checked
+2026-10-14). The judge refuses to run
 while a judge's window is unset.
 
 **Preflight.** `consequence grade --preflight --run N` reports, for every

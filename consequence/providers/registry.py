@@ -26,6 +26,9 @@ class ModelSpec:
     input_price_per_million: float
     output_price_per_million: float
     max_turns: int | None = None
+    # A pricing caveat the dry-run estimate prints: a price change from the
+    # model this one replaced, or a scheduled change to this one.
+    price_note: str | None = None
 
 
 def load_model_registry(path: str | Path = MODELS_YAML_PATH) -> dict[str, ModelSpec]:
@@ -40,6 +43,7 @@ def load_model_registry(path: str | Path = MODELS_YAML_PATH) -> dict[str, ModelS
             input_price_per_million=float(entry["input_price_per_million"]),
             output_price_per_million=float(entry["output_price_per_million"]),
             max_turns=entry.get("max_turns"),
+            price_note=entry.get("price_note"),
         )
         specs[spec.id] = spec
     return specs
@@ -71,6 +75,7 @@ def load_judge_registry(path: str | Path = MODELS_YAML_PATH) -> dict[str, JudgeS
             output_price_per_million=float(entry["output_price_per_million"]),
             context_window_tokens=entry.get("context_window_tokens"),
             primary=bool(entry.get("primary", False)),
+            price_note=entry.get("price_note"),
         )
         specs[spec.id] = spec
     primaries = [s.id for s in specs.values() if s.primary]

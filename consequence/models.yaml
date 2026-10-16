@@ -18,11 +18,16 @@
 #     to use the default.
 
 models:
-  - id: claude-opus-5
+  # The current Opus. Dateless but pinned: "Every Claude model ID is a pinned
+  # snapshot, including the dateless IDs used from the 4.6 generation on."
+  # Model ID, prices and status checked 2026-10-15:
+  # https://platform.claude.com/docs/en/models/opus-5-5/overview
+  - id: claude-opus-5.5
     provider: anthropic
-    api_model: claude-opus-5
-    input_price_per_million: 5.00
-    output_price_per_million: 25.00
+    api_model: claude-opus-5-5
+    input_price_per_million: 4.00
+    output_price_per_million: 20.00
+    price_note: "replaces claude-opus-5 ($5 / $25): 20% cheaper on input and output"
 
   - id: gpt-5.1
     provider: openai
@@ -30,22 +35,32 @@ models:
     input_price_per_million: 1.25
     output_price_per_million: 10.00
 
-  - id: gemini-3.1-pro
+  # Google's flagship, a stable code ("Stable: gemini-4-argon"; "our flagship
+  # reasoning model"), replacing the preview-only gemini-3.1-pro-preview.
+  # Checked 2026-10-15: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+  # Prices: https://ai.google.dev/gemini-api/docs/pricing -- "$2.00 through
+  # November 30, 2026" / "$4.00 starting December 1, 2026" input, "$10.00" /
+  # "$20.00" output (output includes thinking tokens). These are the prices
+  # until November 30; a run on or after December 1 needs them updated first.
+  - id: gemini-4-argon
     provider: google
-    api_model: gemini-3.1-pro-preview
+    api_model: gemini-4-argon
     input_price_per_million: 2.00
-    output_price_per_million: 12.00
+    output_price_per_million: 10.00
+    price_note: "doubles to $4 / $20 from December 1, 2026: update before any run on or after it"
 
-  - id: claude-haiku-4.5
-    provider: anthropic
-    # The dated snapshot. `claude-haiku-4-5` is "a convenience alias that
-    # resolves to the pinned snapshot claude-haiku-4-5-20251001" (checked
-    # 2026-10-14, https://platform.claude.com/docs/en/models/haiku-4-5/overview).
-    # That page also lists Claude Haiku 4.5 as legacy, retirement "Not sooner
-    # than October 15, 2026": confirm it is still served before a real run.
-    api_model: claude-haiku-4-5-20251001
-    input_price_per_million: 1.00
-    output_price_per_million: 5.00
+  # The small, low-cost model, from a provider other than Anthropic: "a
+  # low-latency, cost-effective multimodal model" ("Stable:
+  # gemini-3.5-flash-lite"). Checked 2026-10-15:
+  # https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+  # Prices: https://ai.google.dev/gemini-api/docs/pricing ("$0.30" input,
+  # "$2.50" output, output includes thinking tokens).
+  - id: gemini-3.5-flash-lite
+    provider: google
+    api_model: gemini-3.5-flash-lite
+    input_price_per_million: 0.30
+    output_price_per_million: 2.50
+    price_note: "replaces claude-haiku-4.5 ($1 / $5)"
 
   - id: deepseek-v3.2
     provider: openrouter
@@ -60,30 +75,36 @@ models:
 # Kept apart from `models:` so a judge's id never appears as an episode's
 # model_id, and so judging cost is never mixed into experiment cost.
 #
-#   - api_model and prices are copied from the `models:` entry with the same
-#     api_model, and carry exactly its sourcing (docs/models.md);
-#     tests/test_grader_judge.py fails if they drift apart.
+#   - Prices: when a judge's api_model is also a model under test, they are
+#     copied from that `models:` entry (tests/test_grader_judge.py fails if
+#     they drift apart); otherwise they cite the vendor page here.
 #   - context_window_tokens is taken from the vendor's documentation for that
 #     exact api_model, with the page cited beside each value. The judge
 #     refuses to run while it is null: the overflow check is what guarantees
 #     a transcript is never cut to fit.
 #   - Exactly one judge is primary: it grades every episode. The others are
 #     run on a subset with `consequence grade --judge-model`.
-#   - The primary judge is an Anthropic model, the same family as two of the
-#     models under test (and the same model as one of them), a known
-#     self-preference risk. The OpenAI judge is the cross-family check. See
-#     docs/judge-methodology.md.
+#   - The primary judge must accept a temperature (0 and 0.7). Current Claude
+#     models (Opus 4.7 and later) reject any non-default temperature with a
+#     400; Opus 4.6 accepts one while thinking is off, which it is by default.
+#   - The primary judge is an Anthropic model, the same family as one model
+#     under test (claude-opus-5.5), a known self-preference risk. The OpenAI
+#     judge is the cross-family check. See docs/judge-methodology.md.
 judges:
-  - id: judge-claude-opus-5
+  - id: judge-claude-opus-4.6
     provider: anthropic
-    # A pinned snapshot despite having no date: "Every Claude model ID is a
-    # pinned snapshot, including the dateless IDs used from the 4.6
-    # generation on." (https://platform.claude.com/docs/en/about-claude/models/overview)
-    api_model: claude-opus-5
+    # Pinned (dateless from the 4.6 generation on). "On older models, the
+    # restriction applies only while thinking is on: temperature and top_k
+    # are incompatible with thinking" -- and on Opus 4.6 "thinking is off until
+    # you set thinking: {type: "adaptive"}", which the adapter never sets.
+    # (https://platform.claude.com/docs/en/build-with-claude/thinking)
+    # Status "Active (legacy)", retirement "Not sooner than February 5, 2027".
+    api_model: claude-opus-4-6
+    # "$5 / MTok" input, "$25 / MTok" output, checked 2026-10-15:
+    # https://platform.claude.com/docs/en/models/opus-4-6/overview
     input_price_per_million: 5.00
     output_price_per_million: 25.00
-    # "Context window: 1M tokens" for claude-opus-5, checked 2026-10-14:
-    # https://platform.claude.com/docs/en/models/opus-5/overview
+    # "Context window: 1M tokens" for claude-opus-4-6, same page.
     context_window_tokens: 1000000
     primary: true
 

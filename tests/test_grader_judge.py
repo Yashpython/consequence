@@ -645,15 +645,22 @@ def test_judging_cost_is_tracked_apart_from_experiment_cost(run, capsys):
 
 
 def test_models_yaml_judges_are_pinned_and_priced_like_their_models():
-    raw = yaml.safe_load(MODELS_YAML_PATH.read_text(encoding="utf-8"))
+    """A judge that is also a model under test is priced exactly like it; a
+    judge that isn't cites the vendor page its prices come from."""
+    text = MODELS_YAML_PATH.read_text(encoding="utf-8")
+    raw = yaml.safe_load(text)
     models = {m["api_model"]: m for m in raw["models"]}
     judges = raw["judges"]
     assert sum(bool(j.get("primary")) for j in judges) == 1
     for j in judges:
-        source = models[j["api_model"]]  # same pinned version string as a model under test
-        assert (j["input_price_per_million"], j["output_price_per_million"]) == (
-            source["input_price_per_million"], source["output_price_per_million"])
-        assert j["provider"] == source["provider"]
+        source = models.get(j["api_model"])
+        if source is not None:
+            assert (j["input_price_per_million"], j["output_price_per_million"]) == (
+                source["input_price_per_million"], source["output_price_per_million"])
+            assert j["provider"] == source["provider"]
+        else:
+            block = text[text.index(f"id: {j['id']}"):]
+            assert "https://" in block.split("input_price_per_million")[0], j["id"]
     providers = {j["provider"] for j in judges}
     assert len(providers) >= 2  # a cross-family judge exists
     primary = next(j for j in judges if j.get("primary"))

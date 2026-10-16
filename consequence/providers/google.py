@@ -50,6 +50,12 @@ def translate_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list
         if role == "user":
             contents.append({"role": "user", "parts": [{"text": msg["content"]}]})
         elif role == "assistant":
+            if msg.get("replay") is not None:
+                # The response's own Content, verbatim: "You MUST always
+                # resend all thought blocks exactly as they were received",
+                # and on Gemini 3+ the thought signatures ride on its parts.
+                contents.append(msg["replay"])
+                continue
             parts: list[dict[str, Any]] = []
             if msg.get("content"):
                 parts.append({"text": msg["content"]})
@@ -92,6 +98,11 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
+def served_model_from_raw(raw: Any) -> str | None:
+    """The `model_version` field of a stored generate_content response."""
+    return raw.get("model_version") if isinstance(raw, dict) else None
+
+
 def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResult:
     candidate = response.candidates[0]
     text_parts: list[str] = []
@@ -107,17 +118,25 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
 
     stop_reason = "tool_use" if tool_calls else "end_turn"
     usage = response.usage_metadata
-    raw = response.model_dump() if hasattr(response, "model_dump") else str(response)
+    # mode="json": thought signatures are bytes, which only survive storage
+    # base64-encoded. The replay keeps the SDK's own Content object, whose
+    # signature bytes go back to the API untouched.
+    raw = response.model_dump(mode="json") if hasattr(response, "model_dump") else str(response)
 
     return TurnResult(
         text="".join(text_parts) or None,
         tool_calls=tuple(tool_calls),
         stop_reason=stop_reason,
         input_tokens=usage.prompt_token_count or 0,
-        output_tokens=usage.candidates_token_count or 0,
+        # Thinking tokens are billed as output ("Output (includes thinking
+        # tokens)") but counted apart from candidates_token_count.
+        output_tokens=(usage.candidates_token_count or 0)
+        + (getattr(usage, "thoughts_token_count", None) or 0),
         latency_ms=latency_ms,
         raw_response=raw,
         retry_count=retry_count,
+        served_model=served_model_from_raw(raw),
+        replay=candidate.content,
     )
 
 

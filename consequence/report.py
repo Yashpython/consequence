@@ -49,6 +49,8 @@ def build_report(m: RunMetrics, *, pass_k: tuple[int, ...] = ()) -> dict[str, An
     judges = m.judge_models()
     return {
         "run": asdict(m.run_info()),
+        "served_model_drift": [asdict(s) for s in m.served_model_drift()],
+        "judge_served_models": {j: asdict(m.judge_served_models(j)) for j in judges},
         "primary_judge": primary,
         "coverage": [asdict(c) for c in m.grading_coverage()],
         "judging_cost": {j: asdict(m.judge_cost(j)) for j in judges},
@@ -65,6 +67,7 @@ def _model(m: RunMetrics, model: str, judges: list[str], primary: str | None,
            pass_k: tuple[int, ...]) -> dict[str, Any]:
     return {
         "episodes": m.episode_status_counts(model),
+        "served_models": asdict(m.served_models(model)),
         "state_verifier": _per_category(m.pass_rate_state(model)),
         "pass_hat_k": {str(k): _per_category(m.pass_hat_k(model, k)) for k in pass_k},
         "collateral": _per_category(m.collateral_rate(model)),
@@ -101,6 +104,14 @@ def _num(value: Any, spec: str = "") -> str:
     return "n/a" if value is None else format(value, spec)
 
 
+def _served_text(s: dict[str, Any]) -> str:
+    """Configured vs served, and whether the served version changed."""
+    served = ", ".join(f"`{name}` x{n}" for name, n in s["served"].items()) or "none recorded"
+    unknown = f" ({s['unknown']} unknown)" if s["unknown"] else ""
+    changed = " -- **CHANGED WITHIN THIS RUN**" if s["drift"] else ""
+    return f"Configured `{s['api_model']}`; served: {served}{unknown}{changed}"
+
+
 def _usd(value: float | None) -> str:
     return "n/a" if value is None else f"${value:.4f}"
 
@@ -130,9 +141,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- primary judge (headline verification gap): {report['primary_judge'] or 'none'}",
         "- every table is per model; normal and trap tasks are never combined",
         "",
-        "## Grading coverage",
-        "",
     ]
+    for d in report["served_model_drift"]:
+        lines.extend([(f"**WARNING: served model changed within this run for "
+                       f"{d['configured']}** ({_served_text(d)})"), ""])
+    lines.extend(["## Grading coverage", ""])
     lines.extend(_table(
         ["grader", "judge", "episodes in run", "verdicts", "grading_error", "judge_error",
          "missing"],
@@ -169,7 +182,8 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def _model_markdown(model: str, f: dict[str, Any], primary: str | None) -> list[str]:
-    lines = ["", f"## Model: {model}", "", "### Episodes", ""]
+    lines = ["", f"## Model: {model}", "", _served_text(f["served_models"]), "",
+             "### Episodes", ""]
     lines.extend(_table(["category", *EPISODE_STATUSES],
                         [[cat, *(str(counts[s]) for s in EPISODE_STATUSES)]
                          for cat, counts in f["episodes"].items()]))

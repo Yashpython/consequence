@@ -272,8 +272,11 @@ def estimate_costs(
                             "cost": None if per_call is None else per_call * calls})
     experiment_total = sum(e["cost"] or 0.0 for e in experiment.values())
     judging_total = sum(j["cost"] or 0.0 for j in judging)
+    used = [registry[m] for m in experiment if m in registry]
+    used += [judges[j] for j in judges] if judges else []
     return {"episodes": episodes, "experiment": experiment, "judging": judging,
             "judge_input_tokens": judge_input,
+            "price_notes": {spec.id: spec.price_note for spec in used if spec.price_note},
             "unpriced": sorted([m for m, e in experiment.items() if e["cost"] is None]
                                + [j["label"] for j in judging if j["cost"] is None]),
             "experiment_total": experiment_total, "judging_total": judging_total,
@@ -301,6 +304,8 @@ def _print_dry_run(combos: list[tuple[Task, str, int]], estimate: dict[str, Any]
               f"{j['calls']} call(s) = ~{_format_cost(j['cost'])}")
     print(f"estimated judging cost: ~{_format_cost(estimate['judging_total'])}")
     print(f"estimated grand total: ~{_format_cost(estimate['grand_total'])}")
+    for model_id, note in estimate["price_notes"].items():
+        print(f"price note, {model_id}: {note}")
     if estimate["unpriced"]:
         print(f"no price on file for: {estimate['unpriced']}")
 
@@ -578,6 +583,7 @@ def cmd_grade(args: argparse.Namespace, judge_provider_factory: ProviderFactory)
                 errors += _grade_judge(args, results, setup)
             except judge.JudgeConfigError as exc:
                 raise CLIError(str(exc)) from exc
+        _warn_served_drift(args)
         if errors:
             # Every other episode is graded and recorded; the exit code says
             # the grading isn't complete.
@@ -600,13 +606,37 @@ def cmd_grade(args: argparse.Namespace, judge_provider_factory: ProviderFactory)
 CATEGORY_ORDER = ("normal", "trap", "unknown")
 
 
+def _results_path(args: argparse.Namespace) -> str:
+    return args.results_db or load_config().results_db_path or DEFAULT_DB_PATH
+
+
+def _warn_served_drift(args: argparse.Namespace) -> None:
+    """If any configured model or judge was served by more than one model
+    version in this run, say so loudly and record it in the experiment log.
+    Never blocks grading."""
+    from consequence import experiment_log
+    from consequence.metrics import RunMetrics
+
+    with RunMetrics(_results_path(args), args.run_id) as m:
+        drifts = m.served_model_drift()
+    for d in drifts:
+        served = ", ".join(f"{name} x{n}" for name, n in d.served.items())
+        banner = (f"WARNING: SERVED MODEL CHANGED WITHIN RUN {args.run_id} for "
+                  f"{d.configured} (configured {d.api_model}): {served}")
+        print(banner)
+        print(banner, file=sys.stderr)
+    experiment_log.record_drift(args.run_id, drifts)
+    if drifts:
+        print(f"recorded in {experiment_log.LOG_PATH.relative_to(experiment_log.LOG_PATH.parents[1])}")
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     """Every figure comes from consequence.metrics via consequence.report;
     nothing is computed here."""
     from consequence import report
     from consequence.metrics import MetricsError, RunMetrics
 
-    path = args.results_db or load_config().results_db_path or DEFAULT_DB_PATH
+    path = _results_path(args)
     try:
         with RunMetrics(path, args.run_id) as m:
             data = report.build_report(m, pass_k=tuple(args.pass_k))

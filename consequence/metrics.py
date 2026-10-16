@@ -5,7 +5,7 @@ computed here, from `results.db`, and nowhere else. Open a run with
 RunMetrics and call the metric you need:
 
     with RunMetrics("results/results.db", run_id=1) as m:
-        m.verification_gap("claude-opus-5", judge_model="judge-claude-opus-5")
+        m.verification_gap("claude-opus-5.5", judge_model=primary_judge_id())
 
 The rules, each enforced by tests/test_metrics.py:
 
@@ -54,7 +54,7 @@ MODELS_YAML = Path(__file__).resolve().parent / "models.yaml"
 
 # Must equal consequence.results.SCHEMA_VERSION (a test checks); not imported
 # from there because that module pulls in the environment database code.
-RESULTS_SCHEMA_VERSION = 5
+RESULTS_SCHEMA_VERSION = 6
 
 STATE = "state_verifier"
 COLLATERAL = "collateral"
@@ -80,7 +80,7 @@ METRICS = (
     "collateral_rate", "cost_per_solved_task", "latency_stats", "turn_stats",
     "judge_api_agreement", "judge_vote_agreement", "trap_behaviour_split",
     "cross_judge_agreement", "incomplete_but_verifier_satisfied", "grading_coverage",
-    "episode_status_counts", "judge_cost",
+    "episode_status_counts", "judge_cost", "served_models", "judge_served_models",
 )
 EPISODE_STATUSES = ("completed", "error", "timeout", "max_turns")
 
@@ -251,6 +251,17 @@ class JudgeCost:
 
 
 @dataclass(frozen=True)
+class ServedModels:
+    """What actually served a configured model's calls in this run."""
+
+    configured: str  # the models.yaml id (a model under test, or a judge)
+    api_model: str | None  # what models.yaml asked for; None if the id isn't there
+    served: dict[str, int]  # served_model value -> episodes (or judge rows)
+    unknown: int  # episodes / rows whose response named no model
+    drift: bool  # more than one distinct model served this configuration
+
+
+@dataclass(frozen=True)
 class RunInfo:
     run_id: int
     started_at: str
@@ -285,6 +296,22 @@ def primary_judge_id(models_yaml: Path = MODELS_YAML) -> str:
     if len(primaries) != 1:
         raise MetricsError(f"models.yaml judges: expected one primary, found {primaries}")
     return primaries[0]
+
+
+def configured_api_models(models_yaml: Path = MODELS_YAML) -> dict[str, str]:
+    """{models.yaml id: api_model}, for models and judges alike."""
+    raw = yaml.safe_load(models_yaml.read_text(encoding="utf-8")) or {}
+    return {e["id"]: e["api_model"] for e in [*raw.get("models", []), *raw.get("judges", [])]}
+
+
+def _served(configured: str, values: list[str | None]) -> ServedModels:
+    counts = Counter(v for v in values if v)
+    # An episode whose own calls disagreed is stored comma-joined: split it.
+    distinct = {name for value in counts for name in value.split(",")}
+    return ServedModels(configured=configured,
+                        api_model=configured_api_models().get(configured),
+                        served=dict(sorted(counts.items())), unknown=sum(not v for v in values),
+                        drift=len(distinct) > 1)
 
 
 def _nearest_rank(values: list[float], q: float) -> float | None:
@@ -721,6 +748,30 @@ class RunMetrics:
             cost_usd=None if unpriced else math.fsum(costs), unpriced_rows=unpriced,
             by_grader=by_grader,
         )
+
+    def served_models(self, model: str) -> ServedModels:
+        """18. Which model actually served this configured model's episodes,
+        from each response, with a drift flag when more than one did. A
+        pinned api_model can still be served by something else (a provider
+        alias, a routed host); a change within one run is a confound."""
+        values = [r["served_model"] for r in self._conn.execute(
+            "SELECT served_model FROM episodes WHERE run_id = ? AND model_id = ?",
+            (self.run_id, model))]
+        return _served(model, values)
+
+    def judge_served_models(self, judge_model: str) -> ServedModels:
+        """19. The same, for a judge: across all its gradings rows in this run."""
+        _require_judge(judge_model)
+        values = [r["served_model"] for r in self._conn.execute(
+            "SELECT g.served_model FROM gradings g JOIN episodes e ON e.id = g.episode_id "
+            "WHERE e.run_id = ? AND g.judge_model = ?", (self.run_id, judge_model))]
+        return _served(judge_model, values)
+
+    def served_model_drift(self) -> list[ServedModels]:
+        """Every model and judge in this run whose served version changed."""
+        found = [self.served_models(m) for m in self.models()]
+        found += [self.judge_served_models(j) for j in self.judge_models()]
+        return [s for s in found if s.drift]
 
     # -- lookups: what there is to report on -------------------------------------------------
 

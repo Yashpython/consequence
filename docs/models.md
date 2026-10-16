@@ -4,48 +4,56 @@
 can run: its exact pinned API version string, and the prices used to compute
 `cost_usd` (from actual token counts -- never estimated). See the comment at
 the top of that file for the rules (no floating aliases, `id` vs `api_model`).
+Every `api_model`, price and context window there cites the vendor page it
+came from and the date it was checked. The lineup below was finalized on
+2026-10-15, before any run; it is frozen at the `experiment-v1` tag.
 
 ## The 5 models and why each was picked
 
-The lineup is chosen to span a real spread of capability, price, and vendor,
-not five variations on one tier:
+The lineup spans a real spread of capability, price and vendor, not five
+variations on one tier.
 
-- **`claude-opus-5`** (Anthropic, frontier) -- the reference point this whole
-  project is built closest to; Anthropic's current top-tier model, used
-  elsewhere in this codebase's own tooling. Pinned to the bare model ID
-  `claude-opus-5` -- Anthropic does not use dated snapshots for current-gen
-  models; that bare string *is* the pin (never append a date suffix to it).
-  $5.00 / $25.00 per 1M input/output tokens.
+- **`claude-opus-5.5`** (Anthropic, frontier; `claude-opus-5-5`) -- the current
+  Opus ("Latest. Released September 22, 2026"), replacing `claude-opus-5`,
+  which Anthropic now lists as legacy. Dateless but pinned: "Every Claude model
+  ID is a pinned snapshot, including the dateless IDs used from the 4.6
+  generation on." $4.00 / $20.00 per 1M input/output, 20% below Claude Opus
+  5's $5 / $25. Thinking is always on; three of its documented breaking
+  changes touch this project (see "Claude Opus 5.5 in the agent loop").
+  Source: https://platform.claude.com/docs/en/models/opus-5-5/overview
 
-- **`gpt-5.1`** (OpenAI, frontier) -- the natural frontier counterpart on the
-  other major first-party API, so the benchmark isn't Anthropic-only at the
-  top end. Pinned to the dated snapshot `gpt-5.1-2025-11-13` rather than the
-  bare `gpt-5.1` alias, since OpenAI does publish dated snapshots for this
-  model and a snapshot is a harder pin than a family name. $1.25 / $10.00
-  per 1M.
+- **`gpt-5.1`** (OpenAI, frontier) -- the frontier counterpart on the other
+  major first-party API. Pinned to the dated snapshot `gpt-5.1-2025-11-13`,
+  not the bare `gpt-5.1`. $1.25 / $10.00 per 1M.
 
-- **`gemini-3.1-pro`** (Google, frontier-tier; api_model `gemini-3.1-pro-preview`, the only code Google lists for it, with no dated variant; Google's models page doesn't say whether a preview code can change, checked 2026-10-14) -- the third first-party lab,
-  and Gemini's tool-calling shape (`function_declarations`, "model" role
-  instead of "assistant", no separate tool role) is different enough from
-  the other two that it genuinely exercises the adapter interface rather
-  than being a copy of the OpenAI translation. Pinned to
-  `gemini-3.1-pro-preview` -- Google's own docs classify this as "preview",
-  not the unstable "experimental" tier, and it's still an exact model
-  string, not a `-latest` alias. $2.00 / $12.00 per 1M (standard tier,
-  prompts <=200k tokens).
+- **`gemini-4-argon`** (Google, frontier; `gemini-4-argon`) -- Google's
+  "flagship reasoning model", replacing `gemini-3.1-pro-preview`. Google now
+  documents a stable code at this tier ("Stable: `gemini-4-argon`"), and a
+  stable code is a firmer pin than a preview: "Stable: Points to a specific
+  stable model. Stable models usually don't change", while a preview "may be
+  used for production" with no such statement. Gemini's tool-calling shape
+  (`function_declarations`, a "model" role, no tool role) exercises the
+  adapter interface rather than copying the OpenAI translation. Its price
+  changes mid-quarter: "$2.00 through November 30, 2026" and "$4.00 starting
+  December 1, 2026" input, $10.00 / $20.00 output (output includes thinking
+  tokens). `models.yaml` carries the price until November 30; a run on or after
+  December 1 needs it updated first, and the dry run says so.
+  Sources: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon,
+  https://ai.google.dev/gemini-api/docs/pricing
 
-- **`claude-haiku-4.5`** (Anthropic, small/cheap) -- the cost floor of the
-  lineup, so cheap-model failure modes (skipping tool calls, giving up
-  early, shallower tool-argument reasoning) show up in the results
-  alongside frontier behavior. Reusing Anthropic here (rather than a fourth
-  vendor) was deliberate: it isolates the small/cheap effect from a
-  vendor-family effect, since `claude-opus-5` is also Anthropic. $1.00 /
-  $5.00 per 1M. Pinned to the dated snapshot `claude-haiku-4-5-20251001`:
-  before the 4.6 generation, Anthropic's dateless `claude-haiku-4-5` is an
-  alias that resolves to it, not a pin (checked 2026-10-14,
-  https://platform.claude.com/docs/en/models/haiku-4-5/overview). The same
-  page lists Claude Haiku 4.5 as legacy, retirement "Not sooner than October
-  15, 2026": confirm it is still served before the real run.
+- **`gemini-3.5-flash-lite`** (Google, small and low-cost;
+  `gemini-3.5-flash-lite`) -- the cost floor, so cheap-model failure modes
+  (skipping tool calls, giving up early, shallow argument reasoning) show up
+  beside frontier behaviour. "A low-latency, cost-effective multimodal model",
+  stable code, function calling supported. $0.30 / $2.50 per 1M. It replaces
+  `claude-haiku-4.5` (`claude-haiku-4-5-20251001`) for two reasons:
+  - Claude Haiku 4.5 is legacy with retirement "Not sooner than October 15,
+    2026", so it could vanish mid-run.
+  - It cuts the models under test that share a family with the primary judge
+    (Anthropic) from two to one, which shrinks the judge's self-preference
+    risk. It also avoids OpenAI, the cross-family judge's family.
+  Sources: https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite,
+  https://ai.google.dev/gemini-api/docs/pricing
 
 - **`deepseek-v3.2`** (open-weights, via OpenRouter) -- the open-weights
   representative, so the lineup isn't all closed frontier labs. Routed
@@ -61,13 +69,63 @@ not five variations on one tier:
   OpenRouter's `/models` page) before running anything that spends money on
   it.
 
+## The judges
+
+- **Primary: `judge-claude-opus-4.6`** (`claude-opus-4-6`). The judge design
+  needs a temperature (three votes at 0, a stability subset at 0.7), and
+  Anthropic documents that on Claude Opus 4.7 and later, including Opus 5 and
+  Opus 5.5, "non-default `temperature`, `top_p`, or `top_k` values return a 400
+  error on every request, regardless of whether thinking is used". On older
+  models "the restriction applies only while thinking is on", and Opus 4.6's
+  thinking is off unless requested, which the adapter never does. So no
+  current Claude model can be this judge; Opus 4.6 is the strongest that can.
+  It is legacy, retirement "Not sooner than February 5, 2027". $5 / $25 per 1M,
+  1M-token context window.
+  Sources: https://platform.claude.com/docs/en/build-with-claude/thinking,
+  https://platform.claude.com/docs/en/models/opus-4-6/overview
+- **Cross-family: `judge-gpt-5.1`** (`gpt-5.1-2025-11-13`), unchanged. Whether
+  it accepts a temperature is unverified; the smoke tests decide.
+
+## Claude Opus 5.5 in the agent loop
+
+From https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5:
+
+- **Thinking blocks must be replayed.** "pass `thinking` blocks back
+  unmodified in tool-use loops". The Anthropic adapter now returns the
+  response's own content blocks and sends them back verbatim as that
+  assistant turn (`TurnResult.replay`). Gemini needs the same ("You MUST
+  always resend all thought blocks exactly as they were received", with
+  signatures on the function-call parts), and the Google adapter does the
+  same with its response `Content`.
+- **Forced tool use returns an error.** Nothing here forces tool use; the
+  agent and the judge both use the default `auto`.
+- **Text between tool calls comes back in `thinking` blocks**, with empty
+  text at the default `display: "omitted"`. So the transcript, and the judge,
+  see Opus 5.5's final message but not its short notes between tool calls,
+  which other models write as ordinary text. This is a known asymmetry in
+  what the judge sees for this one model, not yet resolved: setting
+  `thinking.display` would change the agent's request for one model only.
+
+## Served-version provenance
+
+A pinned `api_model` names what was asked for, not necessarily what served
+the call. Every adapter reads the serving model from its own raw response
+(`served_model_from_raw`: Anthropic and OpenAI `model`, Google
+`model_version`, OpenRouter `model@provider`, since the same open-weights
+model can be routed to different hosts). Each episode and each judge grading
+stores it as `served_model`. If one configured model is served by more than
+one version within a run, `consequence grade` warns and records it in
+`docs/experiment-log.md`, and `consequence report` leads with the warning;
+grading is never blocked. This is also the mitigation for any code a vendor
+may repoint.
+
 ## Pricing sources and dates
 
-All prices except `deepseek-v3.2` (see above) were read from each vendor's
-own current API documentation/pricing page in September 2026, for the exact
-`api_model` string in the registry (standard tier, text tokens, prompts at or
-under any tiering threshold the model has). Re-check `models.yaml`'s prices
-periodically -- vendors change prices without changing the model string.
+Every price except `deepseek-v3.2` (see above) was read from the vendor's own
+current documentation or pricing page for the exact `api_model`, standard
+tier, text tokens. The date each was checked is beside it in `models.yaml`.
+Re-check before a run: vendors change prices without changing the model
+string, and `gemini-4-argon`'s is scheduled to.
 
 ## Retry policy
 
@@ -80,21 +138,17 @@ never retried; retries only ever wrap the transport call that produces one.
 The number of retries a turn took is recorded on `TurnResult.retry_count`
 and summed onto the episode row as `episodes.retry_count`.
 
-## Running a smoke test
+## Smoke tests
 
-Each adapter has exactly one opt-in `@pytest.mark.smoke` test in
-`tests/test_providers.py` -- a single trivial, billed call with no tools, to
-confirm credentials and wiring work. These are excluded by default
-(`pytest`'s default `addopts` excludes both `live` and `smoke`). To run one:
+`tests/test_smoke_providers.py`, excluded by default, billed:
+
+- each judge, once at temperature 0 and once at 0.7, asserting the
+  `record_verdict` call parses and the response names its served model;
+- each model under test, two turns with the benchmark's tools attached: a
+  tool call, then its result and one more call, which is what proves the
+  thinking-block and thought-signature replay is accepted.
 
 ```bash
-pip install -e ".[providers]"   # anthropic, openai, google-genai
-export ANTHROPIC_API_KEY=...    # or OPENAI_API_KEY / GOOGLE_API_KEY / OPENROUTER_API_KEY
-pytest -m smoke -k anthropic    # or openai / google / openrouter
+pip install -e ".[dev,providers]"   # anthropic, openai, google-genai
+pytest -m smoke -rf                 # needs every *_API_KEY in .env
 ```
-
-Each smoke test call is real and billed at that model's own rates -- expect
-a fraction of a cent per run, but it is not free. No experiment (a full set
-of tasks x models x trials) is run in this commit; that's a separate,
-later stage that reuses `consequence.harness.run_episode` with a real
-provider from `consequence.providers.registry.make_provider`.

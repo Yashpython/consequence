@@ -162,6 +162,16 @@ yaml (a test imports it in a fresh interpreter). Rates come per category
 judge metrics always take `judge_model`. `consequence/report.py` lays those out
 per model and computes nothing: `tests/test_report.py` rejects any arithmetic
 in its source. Add a new reported number to metrics.py, never to the report.
+Adapters return two provider-specific things the harness treats as opaque:
+`TurnResult.replay` (the reply's own content, sent back verbatim as that
+assistant turn: Claude thinking blocks and Gemini thought signatures must be
+returned exactly as received in tool-use loops) and `served_model` (read from
+the raw response by each adapter's `served_model_from_raw`). Episodes and
+judge gradings store `served_model`; a configured model served by more than
+one version in a run is flagged by `grade` (and logged in
+`docs/experiment-log.md`) and by `report`, never blocking. The primary judge
+must accept a temperature: current Claude models (Opus 4.7+) reject any
+non-default one, so it is `claude-opus-4-6` with thinking off.
 `db.connect()` pins the Postgres session time zone to UTC; every timestamp
 column is `timestamptz` and every seed timestamp literal carries an explicit
 offset (`tests/test_timestamps.py` enforces both).

@@ -51,6 +51,12 @@ def translate_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list
         if role == "user":
             out.append({"role": "user", "content": msg["content"]})
         elif role == "assistant":
+            if msg.get("replay") is not None:
+                # The response's own content blocks, verbatim: thinking blocks
+                # (with their signatures) must be passed back unmodified in
+                # tool-use loops on models whose thinking is always on.
+                out.append({"role": "assistant", "content": msg["replay"]})
+                continue
             content: list[dict[str, Any]] = []
             if msg.get("content"):
                 content.append({"type": "text", "text": msg["content"]})
@@ -92,6 +98,11 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
+def served_model_from_raw(raw: Any) -> str | None:
+    """The `model` field of a stored Messages API response."""
+    return raw.get("model") if isinstance(raw, dict) else None
+
+
 def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResult:
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
@@ -101,6 +112,7 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         elif block.type == "tool_use":
             tool_calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input))
 
+    raw = response.to_dict()
     return TurnResult(
         text="".join(text_parts) or None,
         tool_calls=tuple(tool_calls),
@@ -108,8 +120,10 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
         latency_ms=latency_ms,
-        raw_response=response.to_dict(),
+        raw_response=raw,
         retry_count=retry_count,
+        served_model=served_model_from_raw(raw),
+        replay=raw.get("content"),
     )
 
 

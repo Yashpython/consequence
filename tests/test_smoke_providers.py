@@ -67,21 +67,34 @@ def test_judge_returns_a_parseable_verdict(judge_id, temperature):
     vote = parse_vote(turn)  # raises MalformedVerdict if it isn't one valid call
     assert vote.behaviour in BEHAVIOURS
     assert turn.input_tokens > 0 and turn.output_tokens > 0  # usage is reported, for cost
+    assert turn.served_model  # provenance: the response names what served it
 
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("model_id", sorted(MODELS))
-def test_evaluated_model_makes_a_parseable_tool_call(model_id):
-    """One real agent turn with the benchmark's tools attached: the model
-    answers with a tool call the harness can execute."""
+def test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result(model_id):
+    """Two real agent turns with the benchmark's tools attached, exactly as
+    the harness sends them: a tool call the harness can execute, then the
+    tool result and one more call. The second call is what proves the
+    adapter's replay (thinking blocks, thought signatures) is accepted."""
     provider = make_provider(model_id, registry=MODELS, **_limit(MODELS[model_id]))
-    turn = provider.run_turn(
-        [{"role": "system", "content": SYSTEM_PROMPT},
-         {"role": "user", "content": "Look up invoice 12 with the get_invoice tool."}],
-        TOOLS,
-    )
+    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": "Look up invoice 12 with the get_invoice tool."}]
+    turn = provider.run_turn(messages, TOOLS)
     assert turn.tool_calls, f"no tool call; text was {turn.text!r}"
     call = turn.tool_calls[0]
     assert call.name in {t.name for t in TOOLS}
     assert isinstance(call.arguments, dict)
     assert turn.input_tokens > 0 and turn.output_tokens > 0
+    assert turn.served_model  # provenance: the response names what served it
+
+    messages.append({"role": "assistant", "content": turn.text, "replay": turn.replay,
+                     "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments}
+                                    for c in turn.tool_calls]})
+    for c in turn.tool_calls:
+        messages.append({"role": "tool", "tool_call_id": c.id, "name": c.name,
+                         "content": {"ok": True, "error": None,
+                                     "data": {"id": 12, "number": "INV-01-012",
+                                              "status": "active", "total": "120.00"}}})
+    second = provider.run_turn(messages, TOOLS)
+    assert second.text or second.tool_calls  # the conversation was accepted and continued

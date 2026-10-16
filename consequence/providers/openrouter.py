@@ -11,6 +11,7 @@ reach OpenRouter's OpenAI-compatible endpoint).
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -25,6 +26,16 @@ DEFAULT_MAX_TOKENS = 4096
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 __all__ = ["OpenRouterProvider", "translate_messages", "translate_tools"]
+
+
+def served_model_from_raw(raw: Any) -> str | None:
+    """`model@provider`: the model slug OpenRouter served and the upstream
+    host it routed the call to. The same open-weights model can be served by
+    different hosts (with different quantizations), so the host is part of
+    what served the call."""
+    if not isinstance(raw, dict) or not raw.get("model"):
+        return None
+    return f"{raw['model']}@{raw['provider']}" if raw.get("provider") else raw["model"]
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -96,4 +107,6 @@ class OpenRouterProvider:
         (response, elapsed_ms), retry_count = call_with_backoff(
             _call, _is_retryable, max_retries=self.max_retries
         )
-        return parse_response(response, elapsed_ms, retry_count)
+        result = parse_response(response, elapsed_ms, retry_count)
+        return dataclasses.replace(result,
+                                   served_model=served_model_from_raw(result.raw_response))

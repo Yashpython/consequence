@@ -532,7 +532,8 @@ def test_mirrored_constants_match_their_sources():
     assert metrics.RESULTS_SCHEMA_VERSION == SCHEMA_VERSION
     assert metrics.STABILITY_TEMPERATURE == STABILITY_TEMPERATURE
     assert set(metrics.TRAP_BEHAVIOURS + metrics.OTHER_BEHAVIOURS) == set(BEHAVIOURS)
-    assert metrics.primary_judge_id() == "judge-claude-opus-5"
+    from consequence.providers.registry import load_judge_registry, primary_judge
+    assert metrics.primary_judge_id() == primary_judge(load_judge_registry()).id
 
 
 def test_episode_status_counts(tmp_path):
@@ -575,7 +576,7 @@ def test_judge_cost_is_per_judge_and_complete(tmp_path):
 
 
 def test_every_listed_metric_exists():
-    assert len(metrics.METRICS) == 17
+    assert len(metrics.METRICS) == 19
     for name in metrics.METRICS:
         assert callable(getattr(RunMetrics, name)), name
 

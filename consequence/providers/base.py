@@ -42,6 +42,15 @@ class TurnResult:
     # How many transport-level retries (429/5xx, exponential backoff) it took
     # to get this turn. 0 for a call that succeeded on the first attempt.
     retry_count: int = 0
+    # The model that actually served the call, as the provider's response
+    # names it (each adapter's served_model_from_raw), which can differ from
+    # the configured api_model. None when the response doesn't say.
+    served_model: str | None = None
+    # Provider-native content to send back verbatim as this assistant turn on
+    # the next call, or None. Opaque to the harness: thinking blocks and
+    # thought signatures must be returned exactly as received in tool-use
+    # loops, so the adapter that produced them is the one that replays them.
+    replay: Any = None
 
 
 class Provider(Protocol):

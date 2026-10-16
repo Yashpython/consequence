@@ -215,6 +215,9 @@ def floating_reason(provider: str, api_model: str) -> str | None:
       ID is pinned only from 4.6 on; older ones need their -YYYYMMDD snapshot.
     - OpenAI: snapshots "let you lock in a specific version of the model" and
       are the -YYYY-MM-DD form; the bare family name is not one.
+    - Google: "Stable: Points to a specific stable model. Stable models
+      usually don't change", unlike preview and experimental codes
+      (ai.google.dev/gemini-api/docs/models). So stable codes only.
     - Every vendor: anything containing "latest" is hot-swapped by definition.
     """
     if not api_model:
@@ -229,6 +232,8 @@ def floating_reason(provider: str, api_model: str) -> str | None:
             return "a dateless Claude ID before the 4.6 generation is an alias"
     if provider == "openai" and not re.search(r"-\d{4}-\d{2}-\d{2}$", api_model):
         return "not an OpenAI dated snapshot"
+    if provider == "google" and re.search(r"-(preview|exp)\b|-exp-|preview", api_model):
+        return "a Google preview or experimental code, not a stable one"
     return None
 
 
@@ -241,6 +246,9 @@ def floating_reason(provider: str, api_model: str) -> str | None:
     ("openai", "gpt-5.1", True),
     ("openai", "gpt-5.1-2025-11-13", False),
     ("google", "gemini-2.5-flash-latest", True),
+    ("google", "gemini-3.1-pro-preview", True),
+    ("google", "gemini-4-argon", False),
+    ("google", "gemini-3.5-flash-lite", False),
 ])
 def test_the_floating_alias_rule_itself(provider, api_model, floating):
     assert (floating_reason(provider, api_model) is not None) == floating

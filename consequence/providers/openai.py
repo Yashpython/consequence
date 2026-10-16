@@ -91,6 +91,11 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
+def served_model_from_raw(raw: Any) -> str | None:
+    """The `model` field of a stored Chat Completions response."""
+    return raw.get("model") if isinstance(raw, dict) else None
+
+
 def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResult:
     choice = response.choices[0]
     message = choice.message
@@ -98,6 +103,7 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         ToolCall(id=c.id, name=c.function.name, arguments=json.loads(c.function.arguments))
         for c in (message.tool_calls or [])
     )
+    raw = response.to_dict()
     return TurnResult(
         text=message.content,
         tool_calls=tool_calls,
@@ -105,8 +111,9 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         input_tokens=response.usage.prompt_tokens,
         output_tokens=response.usage.completion_tokens,
         latency_ms=latency_ms,
-        raw_response=response.to_dict(),
+        raw_response=raw,
         retry_count=retry_count,
+        served_model=served_model_from_raw(raw),
     )
 
 

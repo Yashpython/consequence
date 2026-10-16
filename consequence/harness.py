@@ -137,6 +137,7 @@ def run_episode(
     latency_ms = 0
     turns_completed = 0
     retries_total = 0
+    served: set[str] = set()
     start_time = time.monotonic()
 
     try:
@@ -151,6 +152,8 @@ def run_episode(
             output_tokens += turn.output_tokens
             latency_ms += turn.latency_ms
             retries_total += turn.retry_count
+            if turn.served_model:
+                served.add(turn.served_model)
 
             _record_turn("assistant", content=turn.text, raw_response=turn.raw_response)
             messages.append(
@@ -161,6 +164,9 @@ def run_episode(
                         {"id": c.id, "name": c.name, "arguments": c.arguments}
                         for c in turn.tool_calls
                     ],
+                    # Provider-native content the adapter sends back verbatim
+                    # (thinking blocks, thought signatures); opaque here.
+                    "replay": turn.replay,
                 }
             )
 
@@ -218,6 +224,7 @@ def run_episode(
         latency_ms=int(latency_ms),
         turn_count=turns_completed,
         retry_count=retries_total,
+        served_model=",".join(sorted(served)) or None,
     )
     results.record_transcript(episode_id, transcript)
     results.record_state_diff(

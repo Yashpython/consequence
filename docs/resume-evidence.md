@@ -39,11 +39,11 @@ adapters for Anthropic, OpenAI, Google and OpenRouter.
 | Tools exposed to the agent | 7 <!-- fact:tools.count --> | MEASURED | `consequence/tools/schema.py` `TOOLS` |
 | Models in the registry | 5 <!-- fact:models.count --> | MEASURED | `consequence/models.yaml` |
 | Judge models (separate `judges:` section) | 2 <!-- fact:judges.count --> | MEASURED | `consequence/models.yaml` `judges:` |
-| Metrics computed from the results DB | 17 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
+| Metrics computed from the results DB | 19 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
 | Providers in the registry | 4 <!-- fact:providers.count --> | MEASURED | `provider` field in `consequence/models.yaml` |
 | Trials per (task, model) in the experiment | NOT YET MEASURED | NOT YET MEASURED | Not fixed yet: `consequence run --trials` defaults to one. Set by the first real run. |
 | Total episodes run against real models | NOT YET MEASURED | NOT YET MEASURED | `consequence status` after the first real run. No real run exists. |
-| Offline tests | 658 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
+| Offline tests | 678 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
 | Live tests (real Postgres) | 332 <!-- fact:tests.live --> | MEASURED | `pytest --collect-only -q -m live` |
 | Smoke tests (one billed API call each) | 9 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`: each judge at temperature 0 and 0.7, each model under test one tool-calling turn. Never run; see section 9. |
 | Adversarial strategies | 6 <!-- fact:adversarial.strategies --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
@@ -239,6 +239,20 @@ marked blocks, never copied.
 - **Will come from:** the first real run.
 - **Regenerate:** `RunMetrics(db, run).episode_status_counts(model)`.
 
+### 3.15 Served-model drift
+
+- **Definition:** for each configured model and judge, which model versions
+  actually served its calls in a run (read from each response), and whether
+  more than one did. A pinned model ID can still be served by something else:
+  a provider alias, a routed host, a repointed code.
+- **Formula:** distinct `served_model` values over the run's episodes (or
+  the judge's gradings rows); drift when there is more than one.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the first real run.
+- **Regenerate:** `RunMetrics(db, run).served_models(model)`,
+  `.judge_served_models(judge_model)`; `consequence grade` and `consequence
+  report` flag drift.
+
 ## 4. Engineering decisions worth claiming
 
 | Decision | Why it was made | Where it is enforced in code | What it rules out |
@@ -258,6 +272,9 @@ marked blocks, never copied.
 | All reported numbers come from one read-only module | One definition per number, and no way for reporting code to change the record | `consequence/metrics.py` opens `results.db` read-only and imports only the standard library and yaml; a test imports it in a fresh interpreter to prove it loads no model, environment or seed code | Two places computing the same number differently; a metric that quietly writes or calls a model |
 | The report computes nothing | A report that does its own counting is a second definition of every number, and the old one pooled models together | `consequence/report.py` only calls `RunMetrics` and formats; `tests/test_report.py` parses it and rejects arithmetic operators, counting builtins and direct DB access, checks every figure equals the metrics' own, and checks it imports nothing but `consequence.metrics` | A report figure that disagrees with the metric it claims to show; results pooled across models |
 | Vendor-documented model configuration | A floating alias or a remembered context window would make the run unrepeatable or let a transcript overflow silently | Every `api_model` passes a vendor-specific pinned-version rule in `tests/test_providers.py` (a planted alias fails it); every judge context window is cited to the vendor's page in `models.yaml` and must be set or the judge refuses to run | An evaluated model silently upgraded mid-study; an overflow check built on a guessed number |
+| Provider-native replay in tool-use loops | Claude thinking blocks and Gemini thought signatures must go back exactly as received, which a provider-neutral conversation can't reconstruct | Each adapter returns its reply's own content as `TurnResult.replay` and sends it back verbatim; the harness passes it through opaquely (rule 7 holds) | A model that reasons worse, or rejects the call, because its own reasoning state was dropped mid-episode |
+| Served-version provenance | A pinned model ID names what was asked for, not what answered | `served_model` on every episode and judge grading, read from the raw response by each adapter; drift flagged by `grade`, `report` and the experiment log, never blocking | Silently mixing two model versions in one model's results |
+| A primary judge chosen for its controls, not its recency | The judge design needs temperature 0 and 0.7, and current Claude models reject any non-default temperature | `models.yaml`: `claude-opus-4-6`, thinking left off; documented in `docs/models.md` | A judge configuration that could never have run |
 | A planted-bug harness that refuses a red baseline | A count of "tests that caught the bug" is only meaningful if those tests pass without it | `consequence/planted_bugs.py` runs both suites unchanged first and stops without planting or writing if either has a failure | Publishing noise as validation, as happened once with the database down |
 | Two notions of success kept apart | An episode that crashed after the right write must still fail, but that fact is worth reporting | `gradings.passed` vs `gradings.verifier_verdict_raw`; `status = 'grading_error'` for a verifier that raises | Crashes counted as passes; verifier bugs counted as agent failures |
 
@@ -313,6 +330,14 @@ How I would say each one out loud:
   the vendor's own rule for what counts as a pinned version, and every judge
   context window carries a link to the page it came from. That check found
   one of the models under test pinned to an alias.
+- **Replay.** Some models keep part of their reasoning in opaque blocks that
+  must be sent back exactly as received on the next call. Each adapter hands
+  the harness its own reply to replay verbatim, so the harness stays
+  provider-neutral and no model loses its reasoning mid-task.
+- **Served versions.** Every call records the model that actually answered,
+  because a pinned name is only what was asked for. If one model is served by
+  two versions within a run, grading still goes ahead but it is flagged
+  everywhere the results are read.
 - **A harness that checks itself.** My bug-planting harness runs the suites
   clean first and refuses to measure if anything already fails, because a
   database outage once made every planted bug look caught by every test.
@@ -523,6 +548,59 @@ How I would say each one out loud:
 - **How it was proven:** `test_a_red_baseline_plants_nothing_and_writes_nothing`;
   the table was then regenerated with the database up.
 
+### 5.14 The primary judge could never have run
+
+- **What was wrong:** the judge design sends temperature 0 and 0.7, and the
+  primary judge was Claude Opus 5. Anthropic documents that on Opus 4.7 and
+  later, Opus 5 included, "non-default `temperature`, `top_p`, or `top_k`
+  values return a 400 error on every request, regardless of whether thinking
+  is used".
+- **How it was discovered:** reading the vendor documentation while moving
+  the lineup to the current Opus, before any smoke test had run.
+- **Mechanism:** newer Claude models removed sampling controls; the design
+  assumed every judge has them.
+- **Fix:** uncommitted at time of writing. The primary judge is
+  `claude-opus-4-6`, the strongest Claude model that accepts a temperature
+  (with thinking off, its default); `claude-opus-5.5` is evaluated only.
+- **How it was proven:** against documentation only. The judge smoke tests,
+  unrun, are what will confirm it.
+
+### 5.15 Gemini adapter: thinking left out of cost, and a storage crash
+
+- **What was wrong:** output tokens were `candidates_token_count`, which
+  excludes thinking tokens that Google bills as output ("Output (includes
+  thinking tokens)"); and the stored raw response kept thought signatures as
+  bytes, which JSON can't encode, so recording a thinking model's transcript
+  could fail.
+- **How it was discovered:** reading the Google adapter while checking how
+  Gemini thought signatures must be replayed.
+- **Mechanism:** both followed from Gemini 3+ models thinking by default;
+  the adapter was written for responses without thinking.
+- **Fix:** uncommitted at time of writing. Output tokens add
+  `thoughts_token_count`; the raw response is stored in JSON mode.
+- **How it was proven:** `test_google_replays_its_content_and_counts_thinking_as_output`
+  with a fake response; not yet against the real API.
+
+### 5.16 Reasoning state was dropped between agent turns
+
+- **What was wrong:** adapters rebuilt each assistant turn from its text and
+  tool calls, discarding Claude thinking blocks and Gemini thought
+  signatures, both of which the vendors require back unmodified in tool-use
+  loops.
+- **How it was discovered:** the Claude Opus 5.5 "what's new" page ("pass
+  `thinking` blocks back unmodified in tool-use loops") and Google's thinking
+  guide ("You MUST always resend all thought blocks exactly as they were
+  received").
+- **Mechanism:** the provider-neutral conversation format had no place for
+  provider-only state.
+- **Fix:** uncommitted at time of writing. `TurnResult.replay`, sent back
+  verbatim by the adapter that produced it.
+- **How it was proven:** offline tests check the replay goes back verbatim
+  (`test_anthropic_replays_its_own_blocks_verbatim`,
+  `test_the_harness_replays_and_records_the_served_model`); each model's smoke
+  test now makes a second call after a tool result, which is what will prove
+  the vendors accept it.
+
 ## 6. Evidence that the work validates itself
 
 ### Adversarial verifier audit
@@ -549,7 +627,7 @@ design.
 
 | Fact | Value | Status | Source |
 |---|---|---|---|
-| Grader reads the live environment: offline tests failing | 25 <!-- fact:planted.reads_live_environment.offline --> | MEASURED | `planted-bugs` |
+| Grader reads the live environment: offline tests failing | 27 <!-- fact:planted.reads_live_environment.offline --> | MEASURED | `planted-bugs` |
 | Grader reads the live environment: live tests failing | 1 <!-- fact:planted.reads_live_environment.live --> | MEASURED | `planted-bugs` |
 | Grader skips errored episodes: offline tests failing | 14 <!-- fact:planted.skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
 | Grader skips errored episodes: live tests failing | 1 <!-- fact:planted.skips_errored_episodes.live --> | MEASURED | `planted-bugs` |
@@ -594,8 +672,8 @@ something not yet measured.
 - **READY** Hardened 25 <!-- fact:verifiers.count --> state-based verifiers against reward hacking, closing 27 <!-- fact:adversarial.closed --> of the 39 <!-- fact:adversarial.succeeded_at_baseline --> attacks that beat them, by running 150 <!-- fact:adversarial.attempted --> scripted adversarial agents across 6 <!-- fact:adversarial.strategies --> cheating strategies.
 - **READY** Caught a write-then-revert exploit that passed all 25 <!-- fact:adversarial.transient_write.succeeded_at_baseline --> verifiers, by adding an audit-trail check that every verifier inherits centrally.
 - **READY** Found and fixed a tool-layer bug where a single wildcard character in model input returned every supplier's records, proven by restoring the old filter and watching 5 <!-- fact:planted.substring_supplier_filter.live --> new tests fail.
-- **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 25 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
-- **READY** Built a test suite of 658 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
+- **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 27 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
+- **READY** Built a test suite of 678 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
 - **DRAFT** Measured how often agents claim success the database contradicts (verification gap: NOT YET MEASURED) across the registry's models, by grading final state instead of transcripts.
 - **DRAFT** Showed the difference between one-shot and every-time reliability (pass@1 vs pass^k: NOT YET MEASURED), by running repeated trials per task and model.
 - **DRAFT** Quantified collateral damage (rate: NOT YET MEASURED) by classifying every out-of-scope row change as benign or destructive.
@@ -630,16 +708,23 @@ something not yet measured.
 - **"Self-preference bias is handled."** The cross-family judge is a design
   that can measure it; nothing has been measured.
 - **"Every model ID and context window is verified."** They are taken from
-  vendor documentation, checked 2026-10-14 and cited in `models.yaml`; no
-  call has confirmed them yet (the smoke suite is unrun). Gemini's
-  `gemini-3.1-pro-preview` has no dated variant, and Google doesn't say
-  whether a preview code can change.
+  vendor documentation, checked 2026-10-14 and 2026-10-15 and cited in
+  `models.yaml`; no call has confirmed them yet (the smoke suite is unrun).
+- **"The replay fix works with the real APIs."** It is tested offline only;
+  the two-turn smoke tests are what will show the vendors accept it.
+- **The judge saw the same agent text for every model.** Not for Claude Opus
+  5.5: its notes between tool calls come back as thinking blocks with empty
+  text by default, so the judge sees its final message only. Other models
+  write those notes as text.
+- **One price for `gemini-4-argon` across the whole run.** Google doubles it
+  on December 1, 2026; a run on or after that date needs `models.yaml`
+  updated first.
 - **"Both judges run at temperature 0 and 0.7."** Unverified for GPT-5.1:
   OpenAI's model page is silent on sampling parameters, and community reports
   say GPT-5-series reasoning models reject `temperature`.
-- **Claude Haiku 4.5 in the final results, unchecked.** Anthropic lists it as
-  legacy, retirement "Not sooner than October 15, 2026". Confirm it is still
-  served before the run, and say if it was swapped.
+- **"Self-preference is ruled out."** The primary judge shares a family with
+  one model under test (`claude-opus-5.5`), down from two; that reduces the
+  risk, it doesn't remove it.
 - **The failure taxonomy.** It doesn't exist.
 - **A verification gap without its n and sensitivity bound.** When any
   episode lacks a verdict, the paired gap alone can mislead: in the metrics
@@ -659,6 +744,7 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-15 | uncommitted lineup work | Final lineup before `experiment-v1`: `claude-opus-5.5` replaces Opus 5, `gemini-4-argon` (stable) replaces the 3.1 Pro preview, `gemini-3.5-flash-lite` replaces Claude Haiku 4.5; primary judge `claude-opus-4-6`, because current Claude models reject any non-default temperature. Added served-version provenance (3.15, two metrics), provider-native replay, defects 5.14 to 5.16, three engineering decisions, and replaced the Haiku and Gemini-preview guards in section 9 with four current ones. |
 | 2026-10-14 | uncommitted pre-experiment work | Pinned Claude Haiku 4.5 to its dated snapshot and set both judge context windows from cited vendor pages; the smoke suite now covers each judge at both temperatures and each model with tools; the four judge mutations are stored in the planted-bug table; single-vote judging with an API-agreement sample, dry-run judging estimates and an overflow preflight. Added defects 5.11 (a floating alias), 5.12 (the OpenRouter key) and 5.13 (planted bugs measured against a red baseline), two engineering decisions, the 3.6 source rule, and replaced two section 9 guards with three current ones. |
 | 2026-10-13 | uncommitted report work | `consequence/report.py` now lays out `consequence/metrics.py` per model and computes nothing; added the judging cost (3.13) and episode outcome (3.14) definitions, two metrics behind them, the "report computes nothing" engineering decision, and defect 5.10 (the old report pooled every model). Metric count 15 to 17. |
 | 2026-10-13 | uncommitted metrics work | Added `consequence/metrics.py` as the only source of reported numbers. Rewrote section 3 so every definition matches the code and names its `RunMetrics` call: new definitions for the trap behaviour split (3.10), cross-judge agreement over the intersection (3.8) and grading coverage (3.11), plus time and turns (3.12). Corrected three earlier definitions to match the metrics as specified: the verification gap is a difference in percentage points, not a share of judge passes; collateral is over state passes only; cost per solved task is per category, traps included. Added the no-verdict sensitivity bound and the single metrics module to section 4, a scale fact, and section 9 guards. |
