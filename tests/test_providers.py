@@ -22,6 +22,7 @@ from consequence.providers.registry import (
     compute_cost,
     load_judge_registry,
     load_model_registry,
+    make_provider,
 )
 from consequence.tools.schema import TOOLS
 
@@ -141,7 +142,10 @@ def test_unknown_message_role_raises_in_every_adapter():
 def _temperature_in(provider) -> object:
     kwargs = provider._request([{"role": "system", "content": "s"},
                                 {"role": "user", "content": "u"}], TOOLS)
-    return kwargs.get("config", kwargs).get("temperature", "absent")
+    # Anthropic's goes in extra_body: the pinned SDK's create() has no
+    # temperature parameter (tests/test_provider_sdk.py calls the real SDK).
+    body = kwargs.get("extra_body") or kwargs.get("config", kwargs)
+    return body.get("temperature", "absent")
 
 
 @pytest.mark.parametrize("make", [
@@ -278,3 +282,74 @@ def test_every_judge_has_a_documented_context_window():
         block = text[text.index(f"id: {spec.id}"):]
         assert "context_window_tokens" in block and "https://" in block.split(
             "context_window_tokens")[0], spec.id  # a URL precedes the value
+
+
+# -- Anthropic: structured-output verdicts and thinking display -----------------------------
+
+
+def test_structured_output_schema_is_one_the_api_accepts():
+    """Structured outputs support no numeric bounds and need closed objects:
+    the bounds move into the description (parse_vote still enforces them)."""
+    from consequence.graders.judge_prompt import VERDICT_TOOL
+
+    schema = anthropic_adapter.output_schema(VERDICT_TOOL)
+    confidence = schema["properties"]["confidence"]
+    assert "minimum" not in confidence and "maximum" not in confidence
+    assert "minimum 0" in confidence["description"] and "maximum 1" in confidence["description"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["passed", "confidence", "reasoning", "behaviour"]
+    assert VERDICT_TOOL.json_schema()["properties"]["confidence"]["minimum"] == 0  # untouched
+
+
+def test_structured_output_sends_a_schema_instead_of_tools():
+    from consequence.graders.judge_prompt import VERDICT_TOOL
+
+    provider = anthropic_adapter.AnthropicProvider(model_id="m", api_model="a",
+                                                   structured_output=True)
+    kwargs = provider._request([{"role": "user", "content": "u"}], (VERDICT_TOOL,))
+    assert "tools" not in kwargs and "tool_choice" not in kwargs
+    assert kwargs["output_config"]["format"]["schema"] == anthropic_adapter.output_schema(
+        VERDICT_TOOL)
+    with pytest.raises(ValueError, match="exactly one tool"):
+        provider._request([{"role": "user", "content": "u"}], TOOLS)
+
+
+def test_thinking_display_is_validated_and_updates_sends_its_beta_header():
+    with pytest.raises(ValueError, match="thinking_display"):
+        anthropic_adapter.AnthropicProvider(model_id="m", api_model="a", thinking_display="all")
+    plain = anthropic_adapter.AnthropicProvider(model_id="m", api_model="a")._request(
+        [{"role": "user", "content": "u"}], TOOLS)
+    assert "thinking" not in plain and "extra_headers" not in plain
+    updates = anthropic_adapter.AnthropicProvider(
+        model_id="m", api_model="a", thinking_display="updates")._request(
+        [{"role": "user", "content": "u"}], TOOLS)
+    assert updates["thinking"] == {"type": "adaptive", "display": "updates"}
+    assert updates["extra_headers"] == {"anthropic-beta": anthropic_adapter.DISPLAY_UPDATES_BETA}
+
+
+def test_progress_updates_are_narration_only_when_display_returns_them():
+    from types import SimpleNamespace
+
+    blocks = [SimpleNamespace(type="thinking", thinking=""),
+              SimpleNamespace(type="thinking", thinking="Checking invoice 12 next."),
+              SimpleNamespace(type="tool_use", id="t1", name="get_invoice",
+                              input={"invoice_id": 12}),
+              SimpleNamespace(type="text", text="Invoice 12 "),
+              SimpleNamespace(type="text", text="is active.")]
+    response = SimpleNamespace(content=blocks, stop_reason="tool_use",
+                               usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                               to_dict=lambda: {"model": "claude-opus-5-5", "content": []})
+    shown = anthropic_adapter.parse_response(response, 0, 0, progress_updates=True)
+    hidden = anthropic_adapter.parse_response(response, 0, 0)
+    assert shown.text == "Checking invoice 12 next.\n\nInvoice 12 is active."
+    assert hidden.text == "Invoice 12 is active."  # as before: text blocks only
+
+
+def test_make_provider_applies_the_entry_s_options_and_output_cap():
+    registry = load_model_registry()
+    opus = make_provider("claude-opus-5.5", registry=registry)
+    assert opus.thinking_display == "updates"
+    gemini = make_provider("gemini-4-argon", registry=registry, max_output_tokens=777)
+    assert gemini.max_output_tokens == 777  # Google's own name for the cap
+    gpt = make_provider("gpt-5.1", registry=registry, max_output_tokens=555)
+    assert gpt.max_tokens == 555

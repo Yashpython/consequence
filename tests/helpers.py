@@ -50,10 +50,10 @@ def record_episode_with_state(
     for tool, args in actions:
         result = env.call_tool(tool, args)
         assert result["ok"], (tool, args)
-        turns.append({"turn_index": len(turns), "role": "assistant", "content": None})
+        turns.append({"turn_index": len(turns), "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": None})
         turns.append({"turn_index": len(turns), "role": "tool", "tool_name": tool,
                       "tool_args": args, "tool_result": result})
-    turns.append({"turn_index": len(turns), "role": "assistant", "content": "Done."})
+    turns.append({"turn_index": len(turns), "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Done."})
     before, after = env.snapshots()
     state_diff = diff(before, after)
     episode_id = results.record_episode(
@@ -78,6 +78,15 @@ SECOND_JUDGE = JudgeSpec(id="judge-other-family", provider="stub", api_model="st
                          input_price_per_million=1.0, output_price_per_million=4.0,
                          context_window_tokens=200_000)
 TEST_JUDGES = {TEST_JUDGE.id: TEST_JUDGE, SECOND_JUDGE.id: SECOND_JUDGE}
+# A judge that rejects a temperature, like Claude Opus 5.5: votes at the
+# provider's default sampling, never sent a temperature.
+DEFAULT_SAMPLING_JUDGE = JudgeSpec(id="judge-no-temperature", provider="stub",
+                                   api_model="stub-3", input_price_per_million=4.0,
+                                   output_price_per_million=20.0,
+                                   context_window_tokens=200_000, primary=True,
+                                   sampling="provider_default")
+DEFAULT_SAMPLING_JUDGES = {DEFAULT_SAMPLING_JUDGE.id: DEFAULT_SAMPLING_JUDGE,
+                           SECOND_JUDGE.id: SECOND_JUDGE}
 
 
 def verdict(passed: bool, behaviour: str, confidence: float = 0.9,

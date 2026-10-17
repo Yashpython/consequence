@@ -57,7 +57,8 @@ def build(results: Results, run_id: int, episodes: list[dict]) -> list[int]:
                                    detail_json={"clean": clean,
                                                 "severity": None if clean else collateral})
         for grader, temperature, key in (("llm_judge", 0.0, "judges"),
-                                         ("llm_judge_stability", 0.7, "stability")):
+                                         ("llm_judge_stability", 0.7, "stability"),
+                                         ("llm_judge", None, "default_judges")):
             for judge, verdict in spec.get(key, {}).items():
                 if verdict == "error":
                     results.record_judge_error(ep, grader, judge, reason="context_overflow",
@@ -235,6 +236,58 @@ def test_judge_vote_agreement_reads_only_the_stability_rows(tmp_path):
         v = m.judge_vote_agreement(J1)
         assert (v.n, v.distribution["3/3"], v.distribution["2/3"]) == (2, 1, 1)
         assert m.judge_api_agreement(J1).n == 3  # the temperature-0 rows, separately
+
+
+def test_a_provider_default_judge_s_votes_are_its_sampling_stability(tmp_path):
+    """A judge that rejects a temperature votes three times on every episode
+    at the provider's default sampling: that agreement is sampling stability
+    (judge_vote_agreement), never API agreement, and it covers every episode
+    rather than a subset."""
+    m, _ = open_run(tmp_path, [
+        {"task": N1, "state": True, "default_judges": {J1: (True, "completed", 1.0)}},
+        {"task": N1, "state": True, "default_judges": {J1: (True, "completed", 2 / 3)}},
+        {"task": T, "state": True, "default_judges": {J1: "error"}},
+        {"task": N1, "state": True, "stability": {J2: (True, "completed", 1 / 3)}},
+    ])
+    with m:
+        v, api = m.judge_vote_agreement(J1), m.judge_api_agreement(J1)
+        other = m.judge_vote_agreement(J2)
+        assert m.pass_rate_judge("m-a", J1)["normal"].n == 2  # its verdicts are verdicts
+    assert (v.n, v.distribution["3/3"], v.distribution["2/3"], v.no_verdict) == (2, 1, 1, 1)
+    assert v.condition == "provider_default"
+    assert (api.n, api.condition) == (0, None)
+    assert (other.n, other.condition) == (1, "temperature 0.7")
+
+
+def test_narration_chars_counts_the_agent_s_own_text_and_nothing_else(tmp_path):
+    """Per episode, the characters of the agent's own turns; the system
+    prompt, the task, tool arguments and tool results are not narration. An
+    episode with no text counts as 0, per model."""
+    path = tmp_path / "results.db"
+    with Results(path) as results:
+        run_id = seed_run(results)
+        talkative, silent, other = build(results, run_id, [
+            {"task": N1}, {"task": N1}, {"task": N1, "model": "m-b"}])
+        results.record_transcript(talkative, [
+            {"turn_index": 0, "role": "system", "content": "s" * 500},
+            {"turn_index": 1, "role": "user", "content": "u" * 300},
+            {"turn_index": 2, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Checking the invoice."},
+            {"turn_index": 3, "role": "tool", "tool_name": "get_invoice",
+             "tool_args": {"invoice_id": 12}, "tool_result": {"ok": True, "data": "x" * 900}},
+            {"turn_index": 4, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Done."},
+        ])
+        results.record_transcript(silent, [
+            {"turn_index": 0, "role": "user", "content": "u"},
+            {"turn_index": 1, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": None},
+            {"turn_index": 2, "role": "tool", "tool_name": "get_invoice",
+             "tool_args": {"invoice_id": 1}, "tool_result": {"ok": True}},
+        ])
+        results.record_transcript(other, [
+            {"turn_index": 0, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "z" * 40}])
+    with RunMetrics(path, run_id) as m:
+        mine, theirs = m.narration_chars("m-a"), m.narration_chars("m-b")
+    assert (mine.n, mine.median, mine.p90) == (2, (26 + 0) / 2, 26)
+    assert (theirs.n, theirs.median) == (1, 40)
 
 
 # -- 12-15 ------------------------------------------------------------------------------------------
@@ -576,7 +629,7 @@ def test_judge_cost_is_per_judge_and_complete(tmp_path):
 
 
 def test_every_listed_metric_exists():
-    assert len(metrics.METRICS) == 19
+    assert len(metrics.METRICS) == 21
     for name in metrics.METRICS:
         assert callable(getattr(RunMetrics, name)), name
 

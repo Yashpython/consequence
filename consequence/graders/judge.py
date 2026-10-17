@@ -15,11 +15,19 @@ inaction and a false claim all leave an identical empty diff, and only the
 transcript separates them -- hence `behaviour` on every verdict.
 
 Per episode the judge votes three times (VOTES); the row records the majority
-and every vote. At temperature 0 the votes differ only through API-level
-nondeterminism, so their agreement is stored as judge_api_agreement and makes
-no claim about the judge's reliability. --judge-stability-subset re-judges a
-sample at STABILITY_TEMPERATURE under grader 'llm_judge_stability'; that
-agreement (judge_vote_agreement) is the reliability number.
+and every vote. What their agreement measures depends on how the judge
+samples (models.yaml `sampling`):
+  - temperature: at temperature 0 the votes differ only through API-level
+    nondeterminism, so their agreement is stored as judge_api_agreement and
+    makes no claim about the judge's reliability. --judge-stability-subset
+    re-judges a sample at STABILITY_TEMPERATURE under grader
+    'llm_judge_stability'; that agreement (judge_vote_agreement) is the
+    reliability number.
+  - provider_default: no temperature is sent (the model rejects one), so the
+    three votes are independent draws at the provider's default sampling and
+    their agreement is sampling stability, stored as judge_vote_agreement on
+    every episode. Rows record judge_sampling 'provider_default' and no
+    temperature. There is no stability subset and no API-agreement subset.
 
 Never truncated: if prompt plus transcript may not fit the judge's context
 window, the episode is recorded as judge_error / context_overflow and the
@@ -44,7 +52,7 @@ from typing import Any
 
 from consequence.graders.judge_prompt import BEHAVIOURS, JUDGE_PROMPT, VERDICT_TOOL
 from consequence.providers.base import Provider, TurnResult
-from consequence.providers.registry import JudgeSpec, compute_cost
+from consequence.providers.registry import PROVIDER_DEFAULT, TEMPERATURE, JudgeSpec, compute_cost
 from consequence.results import Results
 
 JUDGE_GRADER = "llm_judge"
@@ -61,7 +69,8 @@ STABILITY_TEMPERATURE = 0.7
 # average more), so a transcript that might not fit is reported as an
 # overflow -- counted, visible -- rather than sent and cut or rejected.
 CONSERVATIVE_BYTES_PER_TOKEN = 2
-# Headroom for the verdict itself: the adapters' default max output tokens.
+# Headroom for the verdict itself when the judge sets no max_output_tokens:
+# the adapters' default max output tokens.
 JUDGE_OUTPUT_RESERVE_TOKENS = 4096
 
 GRADED = "graded"
@@ -118,7 +127,7 @@ class JudgeSummary:
     run_id: int
     grader: str
     judge_model: str
-    temperature: float
+    temperature: float | None  # None: the provider's default sampling
     graded: tuple[JudgeGrade, ...] = field(default_factory=tuple)
     already_graded: tuple[int, ...] = field(default_factory=tuple)
 
@@ -161,10 +170,12 @@ def render_transcript(turns: Sequence[dict[str, Any]]) -> str:
     """Every stored turn, in order, with every stored field verbatim.
 
     Tool arguments and results are inserted exactly as the transcripts table
-    holds them -- nothing re-serialized, shortened or elided. The one column
-    left out is raw_response: the provider's own wire encoding of an
-    assistant turn whose text is already shown here, and whose tool calls
-    appear, with their results, as the tool turns that follow it.
+    holds them -- nothing re-serialized, shortened or elided. Left out:
+    raw_response, the provider's own wire encoding of an assistant turn whose
+    text is already shown here, and whose tool calls appear, with their
+    results, as the tool turns that follow it; and stop_reason /
+    output_capped, harness metadata about how a turn ended, which the judge
+    never sees, like the episode's status.
     """
     blocks = []
     for turn in turns:
@@ -197,7 +208,7 @@ def build_messages(turns: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         {"role": "user", "content": (
             f"TASK INSTRUCTION\n{instruction}\n\n"
             f"TRANSCRIPT OF THE AGENT'S WORK\n{render_transcript(turns)}\n\n"
-            "END OF TRANSCRIPT. Record your verdict with record_verdict."
+            "END OF TRANSCRIPT. Record your verdict as record_verdict."
         )},
     ]
 
@@ -210,9 +221,15 @@ def estimate_tokens(messages: Sequence[dict[str, Any]]) -> int:
     return math.ceil(size / CONSERVATIVE_BYTES_PER_TOKEN)
 
 
+def output_reserve(spec: JudgeSpec) -> int:
+    """Tokens kept free for the judge's reply: its output cap, thinking
+    included, so a transcript that fits leaves the judge room to answer."""
+    return spec.max_output_tokens or JUDGE_OUTPUT_RESERVE_TOKENS
+
+
 def fits(messages: Sequence[dict[str, Any]], spec: JudgeSpec) -> bool:
     assert spec.context_window_tokens is not None
-    return estimate_tokens(messages) + JUDGE_OUTPUT_RESERVE_TOKENS <= spec.context_window_tokens
+    return estimate_tokens(messages) + output_reserve(spec) <= spec.context_window_tokens
 
 
 # -- what the judge says -------------------------------------------------------------------
@@ -267,6 +284,42 @@ def _category(task_id: str) -> str:
     return "trap" if task.difficulty == "trap" else "normal"
 
 
+def check_sampling(spec: JudgeSpec, temperature: float | None, grader: str,
+                   votes: int) -> None:
+    """The condition must be one this judge can be run under, and must
+    measure what its grader's name says."""
+    if spec.sampling == PROVIDER_DEFAULT:
+        if temperature is not None:
+            raise JudgeConfigError(
+                f"judge {spec.id} runs at the provider's default sampling (it rejects a "
+                f"temperature); got temperature {temperature}")
+        if grader != JUDGE_GRADER:
+            raise JudgeConfigError(
+                f"grader {grader!r} needs a judge that takes a temperature; {spec.id}'s "
+                f"{VOTES} votes per episode at the provider's default sampling are already "
+                "its stability measurement")
+        if votes < VOTES:
+            raise JudgeConfigError(
+                f"judge {spec.id} needs {VOTES} votes per episode: at the provider's default "
+                "sampling they are its only stability measurement")
+        return
+    if spec.sampling != TEMPERATURE:
+        raise JudgeConfigError(f"judge {spec.id}: unknown sampling {spec.sampling!r}")
+    if temperature is None:
+        raise JudgeConfigError(f"judge {spec.id} samples at an explicit temperature; none given")
+    if grader == API_AGREEMENT_GRADER and temperature != 0:
+        raise JudgeConfigError(f"grader {grader!r} runs at temperature 0, got {temperature}")
+    if grader == STABILITY_GRADER and temperature != STABILITY_TEMPERATURE:
+        raise JudgeConfigError(f"grader {grader!r} runs at temperature "
+                               f"{STABILITY_TEMPERATURE}, got {temperature}")
+
+
+def default_temperature(spec: JudgeSpec) -> float | None:
+    """The condition a judge's verdicts run under: temperature 0, or None
+    (the provider's default) for a judge that rejects a temperature."""
+    return None if spec.sampling == PROVIDER_DEFAULT else 0.0
+
+
 def check_config(spec: JudgeSpec) -> None:
     if spec.context_window_tokens is None:
         raise JudgeConfigError(
@@ -295,7 +348,7 @@ def judge_episode(provider: Provider, spec: JudgeSpec, turns: Sequence[dict[str,
     if not fits(messages, spec):
         return outcome(status=JUDGE_ERROR, reason=CONTEXT_OVERFLOW,
                        detail={"estimated_tokens": estimate_tokens(messages),
-                               "reserve_tokens": JUDGE_OUTPUT_RESERVE_TOKENS,
+                               "reserve_tokens": output_reserve(spec),
                                "context_window_tokens": spec.context_window_tokens})
     cast: list[Vote] = []
     for i in range(votes):
@@ -366,7 +419,7 @@ def grade_run_with_judge(
     spec: JudgeSpec,
     *,
     grader: str = JUDGE_GRADER,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
     episode_ids: Sequence[int] | None = None,
     regrade: bool = False,
     votes: int = VOTES,
@@ -375,15 +428,17 @@ def grade_run_with_judge(
     """Judge every episode of the run -- the same set the state verifier
     grades, whatever each episode's status -- or only `episode_ids`.
 
-    `provider` must already be configured for `temperature`; the value is
-    recorded on every row so verdicts can be split by condition. With
-    votes=1 the verdict is that one vote and no agreement is recorded: one
-    vote can't disagree with itself, and storing 1.0 would read as a
-    measurement.
+    `provider` must already be configured for `temperature` (None: no
+    temperature sent, the provider's default; required for a judge whose
+    sampling is provider_default, refused otherwise). The condition is
+    recorded on every row so verdicts can be split by it. With votes=1 the
+    verdict is that one vote and no agreement is recorded: one vote can't
+    disagree with itself, and storing 1.0 would read as a measurement.
     """
     if votes < 1 or votes % 2 == 0:
         raise JudgeConfigError(f"votes must be odd and at least 1, got {votes}")
     check_config(spec)
+    check_sampling(spec, temperature, grader, votes)
     if results.get_run(run_id) is None:
         raise JudgeConfigError(f"no run {run_id}")
     episodes = results.episodes_for_run(run_id)

@@ -116,7 +116,13 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
             # so tool results can still be correlated turn-locally.
             tool_calls.append(ToolCall(id=f"call_{i}", name=fc.name, arguments=dict(fc.args)))
 
-    stop_reason = "tool_use" if tool_calls else "end_turn"
+    # The candidate's own finish reason, verbatim (STOP, MAX_TOKENS, SAFETY,
+    # ...). It used to be replaced by "tool_use"/"end_turn", which hid a turn
+    # cut off by the output cap. Gemini counts thinking toward that cap
+    # ("including thought tokens"), so a cut-off turn can carry no call at all.
+    finish = getattr(candidate, "finish_reason", None)
+    finish_name = getattr(finish, "name", finish)
+    stop_reason = str(finish_name) if finish_name else ("tool_use" if tool_calls else "end_turn")
     usage = response.usage_metadata
     # mode="json": thought signatures are bytes, which only survive storage
     # base64-encoded. The replay keeps the SDK's own Content object, whose
@@ -127,6 +133,7 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         text="".join(text_parts) or None,
         tool_calls=tuple(tool_calls),
         stop_reason=stop_reason,
+        output_capped=stop_reason == "MAX_TOKENS",
         input_tokens=usage.prompt_token_count or 0,
         # Thinking tokens are billed as output ("Output (includes thinking
         # tokens)") but counted apart from candidates_token_count.

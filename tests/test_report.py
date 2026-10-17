@@ -103,6 +103,18 @@ def test_every_figure_is_exactly_what_metrics_returns(tmp_path):
         assert data["coverage"] == [asdict(c) for c in m.grading_coverage()]
         assert data["judge_agreement"][J1]["api_temperature_0"] == asdict(
             m.judge_api_agreement(J1))
+        assert data["judge_agreement"][J1]["sampling_stability"] == asdict(
+            m.judge_vote_agreement(J1))
+        assert model["narration_chars"] == asdict(m.narration_chars("m-a"))
+
+
+def test_agreement_is_labelled_with_its_condition_and_narration_is_shown(tmp_path):
+    m, _ = open_run(tmp_path, [
+        {"task": N1, "state": True, "default_judges": {J1: (True, "completed", 2 / 3)}}])
+    with m:
+        md = render_markdown(build_report(m))
+    assert "sampling stability, provider_default" in md
+    assert "Visible narration" in md and "median 0" in md
 
 
 def test_tables_are_per_model_never_pooled(tmp_path):

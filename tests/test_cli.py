@@ -11,6 +11,7 @@ import json
 
 import pytest
 from helpers import (
+    DEFAULT_SAMPLING_JUDGES,
     TEST_JUDGES,
     record_episode_with_state,
     seed_run,
@@ -283,6 +284,39 @@ def test_dry_run_judging_options_are_validated(db_path, capsys, flags, message):
     rc = main(["--results-db", db_path, "run", "--task", "001_void_duplicate", "--model",
                "mock-1", "--dry-run", *flags], provider_factory=_counting_factory([]))
     assert rc == 2 and message in capsys.readouterr().err
+
+
+def test_dry_run_gives_a_provider_default_primary_judge_three_votes():
+    """A judge that rejects a temperature always takes three votes (they are
+    its stability measurement) and has no temperature-0 or 0.7 subsets."""
+    from consequence.cli import DRY_RUN_OUTPUT_SENSITIVITY_TOKENS, estimate_costs
+    from consequence.harness import Task
+    from consequence.providers.registry import ModelSpec
+
+    models = {"m": ModelSpec(id="m", provider="stub", api_model="m",
+                             input_price_per_million=1.0, output_price_per_million=2.0)}
+    combos = [(Task(task_id=f"t{i}", instructions="x"), "m", 0) for i in range(10)]
+    est = estimate_costs(combos, models, DEFAULT_SAMPLING_JUDGES, judge_votes=1,
+                         cross_family_subset=2)
+    lines = {j["label"]: j for j in est["judging"]}
+    primary = lines["primary judge-no-temperature (provider default sampling)"]
+    assert (primary["episodes"], primary["votes"], primary["calls"]) == (10, 3, 30)
+    assert lines["cross-family judge-other-family (temperature 0)"]["votes"] == 1
+    assert not any("subset" in label for label in lines)  # no 0 or 0.7 subsets for it
+    # What thinking would add, stated per extra output tokens rather than guessed.
+    assert primary["per_extra_output"] == pytest.approx(
+        30 * DRY_RUN_OUTPUT_SENSITIVITY_TOKENS * 20.0 / 1e6)
+
+
+@pytest.mark.parametrize("flags", [["--judge-votes", "1"],
+                                   ["--judge-stability-subset", "5"],
+                                   ["--judge-votes", "1", "--api-agreement-subset", "5"]])
+def test_dry_run_refuses_temperature_options_for_a_provider_default_primary(
+        db_path, capsys, monkeypatch, flags):
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: DEFAULT_SAMPLING_JUDGES)
+    rc = main(["--results-db", db_path, "run", "--task", "001_void_duplicate", "--model",
+               "mock-1", "--dry-run", *flags], provider_factory=_counting_factory([]))
+    assert rc == 2 and "provider's default sampling" in capsys.readouterr().err
 
 
 def test_judging_options_on_run_need_dry_run(db_path, capsys):

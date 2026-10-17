@@ -865,8 +865,8 @@ reported, so it gets the same treatment. Ways it could be cheated:
   `judge_error`, and
   `test_the_judge_grades_exactly_the_episodes_the_state_verifier_grades`
   compares the two sets.
-- **Self-preference.** The primary judge is an Anthropic model, the family of
-  one model under test (`claude-opus-5.5`). **Open, mitigated by design:** a judge from a
+- **Self-preference.** The primary judge, Claude Opus 5.5, is the same model
+  as one model under test (`claude-opus-5.5`). **Open, mitigated by design:** a judge from a
   different family (`--judge-model judge-gpt-5.1`) grades a subset, and every
   row records its judge so results split by judge. See
   `docs/judge-methodology.md`.

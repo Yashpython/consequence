@@ -39,13 +39,13 @@ adapters for Anthropic, OpenAI, Google and OpenRouter.
 | Tools exposed to the agent | 7 <!-- fact:tools.count --> | MEASURED | `consequence/tools/schema.py` `TOOLS` |
 | Models in the registry | 5 <!-- fact:models.count --> | MEASURED | `consequence/models.yaml` |
 | Judge models (separate `judges:` section) | 2 <!-- fact:judges.count --> | MEASURED | `consequence/models.yaml` `judges:` |
-| Metrics computed from the results DB | 19 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
+| Metrics computed from the results DB | 21 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
 | Providers in the registry | 4 <!-- fact:providers.count --> | MEASURED | `provider` field in `consequence/models.yaml` |
 | Trials per (task, model) in the experiment | NOT YET MEASURED | NOT YET MEASURED | Not fixed yet: `consequence run --trials` defaults to one. Set by the first real run. |
 | Total episodes run against real models | NOT YET MEASURED | NOT YET MEASURED | `consequence status` after the first real run. No real run exists. |
-| Offline tests | 678 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
+| Offline tests | 747 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
 | Live tests (real Postgres) | 332 <!-- fact:tests.live --> | MEASURED | `pytest --collect-only -q -m live` |
-| Smoke tests (one billed API call each) | 9 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`: each judge at temperature 0 and 0.7, each model under test one tool-calling turn. Never run; see section 9. |
+| Smoke tests (billed API calls) | 8 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`: each judge under each condition it runs under (the primary judge once, at the provider's default; the cross-family judge at 0 and 0.7), each model under test two tool-calling turns. Never run; see section 9. |
 | Adversarial strategies | 6 <!-- fact:adversarial.strategies --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
 | Adversarial attacks (strategies x tasks) | 150 <!-- fact:adversarial.attempted --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
 | CI jobs | 2 <!-- fact:ci.jobs --> | MEASURED | `.github/workflows/ci.yml` (`check`, `live`) |
@@ -127,7 +127,9 @@ marked blocks, never copied.
 ### 3.6 Judge API agreement
 
 - **Definition:** agreement among the judge's three votes on one episode at
-  temperature 0. It measures API-level nondeterminism, NOT judge reliability:
+  temperature 0, for a judge that takes a temperature (the primary judge
+  doesn't, so it has none). It measures API-level nondeterminism, NOT judge
+  reliability:
   the three calls see identical input, so it is expected near 1 and says
   nothing about whether the judge is right. Never present it as
   self-consistency. See `docs/judge-methodology.md`.
@@ -143,15 +145,19 @@ marked blocks, never copied.
 
 ### 3.7 Judge stability
 
-- **Definition:** whether the judge gives the same verdict when sampled at
-  temperature 0.7: the number that speaks to judge reliability.
-- **Formula:** as 3.6, over the `llm_judge_stability` rows at temperature 0.7
-  only.
+- **Definition:** whether the judge gives the same verdict across votes drawn
+  with sampling on (sampling stability): the number that speaks to judge
+  reliability. For the primary judge, which rejects a temperature, the three
+  votes on every episode at the provider's default sampling; for a judge that
+  takes one, a subset re-judged at temperature 0.7.
+- **Formula:** as 3.6, over the primary judge's `llm_judge` rows sampled at
+  `provider_default`, or a temperature judge's `llm_judge_stability` rows at
+  0.7. The figure carries its `condition`.
 - **Value:** NOT YET MEASURED
 - **Will come from:** the live judging commit.
-- **Regenerate:** `consequence grade --run N --grader llm_judge
-  --judge-stability-subset K`, then
-  `RunMetrics(db, run).judge_vote_agreement(judge_model)`.
+- **Regenerate:** `consequence grade --run N --grader llm_judge` (primary
+  judge), or `--judge-model J --judge-stability-subset K` for a temperature
+  judge, then `RunMetrics(db, run).judge_vote_agreement(judge_model)`.
 
 ### 3.8 Cross-judge agreement
 
@@ -253,6 +259,37 @@ marked blocks, never copied.
   `.judge_served_models(judge_model)`; `consequence grade` and `consequence
   report` flag drift.
 
+### 3.16 Visible agent narration
+
+- **Definition:** how much the judge had to read beyond the tool results, per
+  model: characters of the agent's own text per episode. Tool calls, their
+  arguments and tool results are excluded. Models that narrate less give the
+  judge less evidence, which confounds per-model comparisons of the
+  verification gap; this measures that asymmetry instead of assuming it away
+  (`docs/judge-methodology.md`, Limitations).
+- **Formula:** per episode, the summed length of `transcripts.content` on
+  assistant turns (0 if none); median and p90 over the model's episodes,
+  whatever their status.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the first real run.
+- **Regenerate:** `RunMetrics(db, run).narration_chars(model)`; `consequence
+  report` shows it per model.
+
+### 3.17 Episodes cut off by the output cap
+
+- **Definition:** the share of a model's episodes containing any agent turn
+  that stopped because it reached the output cap, per category. A reasoning
+  model that spends the cap on thinking returns no tool call and fails for a
+  reason unrelated to its behaviour; the cap is uniform (16,000 tokens per
+  turn) and this measures the truncation that remains.
+- **Formula:** episodes with any assistant turn where
+  `transcripts.output_capped = 1`, over all the model's episodes in that
+  category, whatever their status; Wilson interval.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the first real run.
+- **Regenerate:** `RunMetrics(db, run).output_capped_episodes(model)`;
+  `consequence report` shows it per model.
+
 ## 4. Engineering decisions worth claiming
 
 | Decision | Why it was made | Where it is enforced in code | What it rules out |
@@ -274,7 +311,13 @@ marked blocks, never copied.
 | Vendor-documented model configuration | A floating alias or a remembered context window would make the run unrepeatable or let a transcript overflow silently | Every `api_model` passes a vendor-specific pinned-version rule in `tests/test_providers.py` (a planted alias fails it); every judge context window is cited to the vendor's page in `models.yaml` and must be set or the judge refuses to run | An evaluated model silently upgraded mid-study; an overflow check built on a guessed number |
 | Provider-native replay in tool-use loops | Claude thinking blocks and Gemini thought signatures must go back exactly as received, which a provider-neutral conversation can't reconstruct | Each adapter returns its reply's own content as `TurnResult.replay` and sends it back verbatim; the harness passes it through opaquely (rule 7 holds) | A model that reasons worse, or rejects the call, because its own reasoning state was dropped mid-episode |
 | Served-version provenance | A pinned model ID names what was asked for, not what answered | `served_model` on every episode and judge grading, read from the raw response by each adapter; drift flagged by `grade`, `report` and the experiment log, never blocking | Silently mixing two model versions in one model's results |
-| A primary judge chosen for its controls, not its recency | The judge design needs temperature 0 and 0.7, and current Claude models reject any non-default temperature | `models.yaml`: `claude-opus-4-6`, thinking left off; documented in `docs/models.md` | A judge configuration that could never have run |
+| The strongest available judge, whatever sampling it accepts | An older, more credulous judge would inflate the verification gap and make the headline look like a strawman; choosing a judge to suit a sampling parameter gets the priority backwards | `models.yaml`: primary judge `claude-opus-5-5`, `sampling: provider_default`; `judge.check_sampling` refuses any temperature, stability subset or API-agreement subset for it before a call; documented in `docs/judge-methodology.md` | A headline gap measured against a weak judge; a temperature sent to a model that rejects one |
+| Agreement named by the condition it measures, enforced by the schema | Three votes at temperature 0 measure API nondeterminism; three at the provider's default measure sampling stability; the arithmetic is the same | `gradings.judge_sampling` plus CHECKs: `judge_api_agreement` only at temperature 0, `judge_vote_agreement` only above 0 or at the provider's default | Reporting provider determinism as judge reliability, or the reverse |
+| A verdict format each judge can be held to | Claude Opus 5.5 rejects forced tool use, so an optional `record_verdict` call could come back as prose | The primary judge answers through structured outputs (`output_config.format`, the verdict schema); the adapter turns the JSON into the same call, checked by the same `parse_vote` | Verdicts lost to `malformed_output`, or guessed from prose |
+| Equal evidence for the judge across models, then measured | Opus 5.5's notes between tool calls come back empty by default where other models write text | Opus 5.5 agents run with `thinking.display: "updates"`, documented as changing only what is returned; the adapter keeps the updates as turn text; `narration_chars` reports what asymmetry remains | A per-model gap that differs because the judge read less |
+| One output cap for every model under test, set above what reasoning needs | Thinking counts toward the cap; a model that spends a small one on thinking returns no tool call and is scored as failing for a reason unrelated to its behaviour, which biases the benchmark against reasoning models | `models.yaml` `agent_max_output_tokens: 16000`; `load_model_registry` refuses a per-model cap; `tests/test_output_cap.py` and the SDK wire tests check every model's request carries it | Comparing models run under different caps; scoring a truncated turn as the model's choice |
+| Truncation stored per turn and measured per model | A cap can still be hit; assuming it never is would hide the bias it was raised to remove | `transcripts.stop_reason` (verbatim) and `output_capped` (each adapter's mapping of its vendor's cap stop), required by the schema on every agent turn; `metrics.output_capped_episodes` | Unmeasured residual truncation in a per-model comparison |
+| Every billed smoke call rehearsed offline through the real SDKs | A request the pinned SDK refuses only shows up when someone pays for a call | `tests/test_provider_sdk.py` runs each smoke-test call through the real SDK against a fake transport; CI installs the SDKs | Smoke-test failures from SDK argument handling (two found: 5.17, 5.18) |
 | A planted-bug harness that refuses a red baseline | A count of "tests that caught the bug" is only meaningful if those tests pass without it | `consequence/planted_bugs.py` runs both suites unchanged first and stops without planting or writing if either has a failure | Publishing noise as validation, as happened once with the database down |
 | Two notions of success kept apart | An episode that crashed after the right write must still fail, but that fact is worth reporting | `gradings.passed` vs `gradings.verifier_verdict_raw`; `status = 'grading_error'` for a verifier that raises | Crashes counted as passes; verifier bugs counted as agent failures |
 
@@ -476,7 +519,7 @@ How I would say each one out loud:
 - **How it was discovered:** hardening review, after the state grader landed.
 - **Mechanism:** the command treated "not implemented" as a note, not an
   error, unlike every other integrity path.
-- **Fix:** uncommitted at time of writing. It now refuses before writing
+- **Fix:** `6d92c81`. It now refuses before writing
   anything and names the missing grader.
 - **How it was proven:** `test_grade_all_fails_closed_when_a_registered_grader_cannot_run`
   asserts the refusal and that no rows were written.
@@ -493,7 +536,7 @@ How I would say each one out loud:
   report never split by model.
 - **Mechanism:** the report predated per-model reporting; it was written when
   runs held one model, and aggregated whatever rows a run contained.
-- **Fix:** uncommitted at time of writing. `consequence/report.py` builds every
+- **Fix:** `60c72a6`. `consequence/report.py` builds every
   table per model from `RunMetrics` and computes nothing; `cli.py` only calls
   it.
 - **How it was proven:** `tests/test_report.py` rejects any arithmetic in the
@@ -513,7 +556,7 @@ How I would say each one out loud:
 - **Mechanism:** the naming convention changed across generations, so a
   dateless ID is a pin for newer models and an alias for older ones; a
   string check can't tell them apart without the vendor's rule.
-- **Fix:** uncommitted at time of writing. Pinned to
+- **Fix:** `7c19937`. Pinned to
   `claude-haiku-4-5-20251001`, with the source cited in `models.yaml`; the
   test now encodes each vendor's documented rule and covers judges too.
 - **How it was proven:** the rule has its own tests, including the old alias,
@@ -529,7 +572,7 @@ How I would say each one out loud:
 - **Mechanism:** OpenRouter is reached through the OpenAI SDK pointed at a
   different base URL; the SDK's credential default belongs to the original
   vendor.
-- **Fix:** uncommitted at time of writing. The adapter resolves
+- **Fix:** `7c19937`. The adapter resolves
   `OPENROUTER_API_KEY` itself and refuses to run without it.
 - **How it was proven:** `test_openrouter_never_sends_the_openai_key` sets
   only `OPENAI_API_KEY` and asserts the adapter refuses.
@@ -543,7 +586,7 @@ How I would say each one out loud:
 - **Mechanism:** the harness counted failures with the bug planted but never
   checked the suites passed without it; every live test failed for lack of a
   database.
-- **Fix:** uncommitted at time of writing. The harness runs both suites
+- **Fix:** `7c19937`. The harness runs both suites
   unchanged first and stops, planting and writing nothing, if either fails.
 - **How it was proven:** `test_a_red_baseline_plants_nothing_and_writes_nothing`;
   the table was then regenerated with the database up.
@@ -559,9 +602,11 @@ How I would say each one out loud:
   the lineup to the current Opus, before any smoke test had run.
 - **Mechanism:** newer Claude models removed sampling controls; the design
   assumed every judge has them.
-- **Fix:** uncommitted at time of writing. The primary judge is
-  `claude-opus-4-6`, the strongest Claude model that accepts a temperature
-  (with thinking off, its default); `claude-opus-5.5` is evaluated only.
+- **Fix:** `f399150` made the primary judge `claude-opus-4-6`, the strongest
+  Claude model that accepts a temperature. Since superseded: the primary
+  judge is `claude-opus-5-5` at the provider's default sampling, with no
+  temperature sent (section 4), because the judge's strength matters more
+  than its sampling controls.
 - **How it was proven:** against documentation only. The judge smoke tests,
   unrun, are what will confirm it.
 
@@ -576,8 +621,8 @@ How I would say each one out loud:
   Gemini thought signatures must be replayed.
 - **Mechanism:** both followed from Gemini 3+ models thinking by default;
   the adapter was written for responses without thinking.
-- **Fix:** uncommitted at time of writing. Output tokens add
-  `thoughts_token_count`; the raw response is stored in JSON mode.
+- **Fix:** `f399150`. Output tokens add `thoughts_token_count`; the raw
+  response is stored in JSON mode.
 - **How it was proven:** `test_google_replays_its_content_and_counts_thinking_as_output`
   with a fake response; not yet against the real API.
 
@@ -593,13 +638,67 @@ How I would say each one out loud:
   received").
 - **Mechanism:** the provider-neutral conversation format had no place for
   provider-only state.
-- **Fix:** uncommitted at time of writing. `TurnResult.replay`, sent back
-  verbatim by the adapter that produced it.
+- **Fix:** `f399150`. `TurnResult.replay`, sent back verbatim by the adapter
+  that produced it.
 - **How it was proven:** offline tests check the replay goes back verbatim
   (`test_anthropic_replays_its_own_blocks_verbatim`,
   `test_the_harness_replays_and_records_the_served_model`); each model's smoke
   test now makes a second call after a tool result, which is what will prove
   the vendors accept it.
+
+### 5.17 The Anthropic SDK has no temperature parameter
+
+- **What was wrong:** the Anthropic adapter passed `temperature` to
+  `client.messages.create()`, which in the pinned `anthropic==1.13.0` has no
+  such parameter. Every temperature-0 judge call to `claude-opus-4-6`, the
+  primary judge in `f399150`, would have raised `TypeError: Messages.create()
+  got an unexpected keyword argument 'temperature'` before any request.
+- **How it was discovered:** installing the pinned SDKs and calling each
+  adapter through its real SDK against a fake transport, before the smoke
+  tests were run.
+- **Mechanism:** the offline tests checked the adapter's request dict, never
+  the SDK call that consumes it.
+- **Fix:** the `final prep` commit. A temperature goes in
+  `extra_body`; `tests/test_provider_sdk.py` makes every smoke-test call
+  through the real SDKs, and CI now installs them.
+- **How it was proven:** `test_an_anthropic_temperature_reaches_the_request_body`.
+
+### 5.18 A judge output cap the SDK refuses without streaming
+
+- **What was wrong:** the new primary judge's cap was first set to 32,000
+  output tokens. The pinned Anthropic SDK refuses a non-streaming request
+  whose `max_tokens` could take over 10 minutes (3,600 s x max_tokens /
+  128,000 > 600 s, so above 21,333), so every judge call would have raised
+  `ValueError` before any request.
+- **How it was discovered:** `test_each_judge_condition_goes_through_its_sdk`
+  failed on the first run of the new offline SDK tests.
+- **Mechanism:** an SDK-side limit, not an API one: nothing in the vendor's
+  model documentation states it.
+- **Fix:** the `final prep` commit. The cap is 16,000, with the limit
+  cited in `models.yaml`.
+- **How it was proven:** the same test passes.
+
+### 5.19 Agents capped at 4,096 tokens, and Gemini cut-offs hidden
+
+- **What was wrong:** every agent turn ran at the adapters' default output
+  cap, 4,096 tokens, and thinking counts toward it on Claude Opus 5.5 and
+  both Gemini models. A turn that spent it on thinking would return no tool
+  call and be scored as the model failing the task. Nothing would have shown
+  it: no agent turn stored its stop reason, and the Google adapter replaced
+  Gemini's finish reason with `tool_use` or `end_turn`, so a `MAX_TOKENS`
+  turn looked like a normal end.
+- **How it was discovered:** reviewing the agent configuration after the
+  judge's own cap had to be sized for thinking (5.18).
+- **Mechanism:** the cap was never set, so the adapters' default applied,
+  sized for models without thinking; the stop reason was treated as
+  adapter-internal.
+- **Fix:** the `final prep` commit. One cap of 16,000 for every model
+  under test; every agent turn stores `stop_reason` and `output_capped`;
+  Gemini's finish reason is kept verbatim; `output_capped_episodes` (3.17)
+  reports what remains.
+- **How it was proven:** `tests/test_output_cap.py` (the cap on every model,
+  each adapter's mapping, storage on every turn, the schema's refusal, the
+  metric) and `test_a_gemini_turn_cut_off_by_the_cap_is_flagged_through_the_real_sdk`.
 
 ## 6. Evidence that the work validates itself
 
@@ -633,7 +732,7 @@ design.
 | Grader skips errored episodes: live tests failing | 1 <!-- fact:planted.skips_errored_episodes.live --> | MEASURED | `planted-bugs` |
 | Old substring supplier filter: offline tests failing | 0 <!-- fact:planted.substring_supplier_filter.offline --> | MEASURED | `planted-bugs` |
 | Old substring supplier filter: live tests failing | 5 <!-- fact:planted.substring_supplier_filter.live --> | MEASURED | `planted-bugs` |
-| Judge skips errored episodes: offline tests failing | 10 <!-- fact:planted.judge_skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
+| Judge skips errored episodes: offline tests failing | 11 <!-- fact:planted.judge_skips_errored_episodes.offline --> | MEASURED | `planted-bugs` |
 | Judge truncates tool results: offline tests failing | 3 <!-- fact:planted.judge_truncates_tool_results.offline --> | MEASURED | `planted-bugs` |
 | Judge skips the overflow check: offline tests failing | 2 <!-- fact:planted.judge_skips_overflow_check.offline --> | MEASURED | `planted-bugs` |
 | Judge imports the state diff: offline tests failing | 1 <!-- fact:planted.judge_imports_state_diff.offline --> | MEASURED | `planted-bugs` |
@@ -673,7 +772,7 @@ something not yet measured.
 - **READY** Caught a write-then-revert exploit that passed all 25 <!-- fact:adversarial.transient_write.succeeded_at_baseline --> verifiers, by adding an audit-trail check that every verifier inherits centrally.
 - **READY** Found and fixed a tool-layer bug where a single wildcard character in model input returned every supplier's records, proven by restoring the old filter and watching 5 <!-- fact:planted.substring_supplier_filter.live --> new tests fail.
 - **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 27 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
-- **READY** Built a test suite of 678 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
+- **READY** Built a test suite of 747 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
 - **DRAFT** Measured how often agents claim success the database contradicts (verification gap: NOT YET MEASURED) across the registry's models, by grading final state instead of transcripts.
 - **DRAFT** Showed the difference between one-shot and every-time reliability (pass@1 vs pass^k: NOT YET MEASURED), by running repeated trials per task and model.
 - **DRAFT** Quantified collateral damage (rate: NOT YET MEASURED) by classifying every out-of-scope row change as benign or destructive.
@@ -712,19 +811,36 @@ something not yet measured.
   `models.yaml`; no call has confirmed them yet (the smoke suite is unrun).
 - **"The replay fix works with the real APIs."** It is tested offline only;
   the two-turn smoke tests are what will show the vendors accept it.
-- **The judge saw the same agent text for every model.** Not for Claude Opus
-  5.5: its notes between tool calls come back as thinking blocks with empty
-  text by default, so the judge sees its final message only. Other models
-  write those notes as text.
+- **The judge saw the same agent text for every model.** Opus 5.5's notes
+  between tool calls are now returned (`display: "updates"`), but they are
+  summaries and it may skip any of them, and every model narrates as much as
+  it chooses. How much each model gave the judge is `narration_chars`, not
+  yet measured; quote it beside any per-model gap.
+- **"No model was truncated."** The cap is 16,000 tokens per agent turn for
+  every model, but a turn can still reach it; how many episodes did is
+  `output_capped_episodes`, not yet measured. DeepSeek V3.2's maximum output
+  through OpenRouter isn't documented on its OpenRouter pages, so whether it
+  accepts 16,000 rests on the unrun smoke test.
+- **"Every model ran at the same reasoning effort."** Each runs at its
+  provider's default, and the defaults differ (Opus 5.5 `medium`, GPT-5.1
+  `none`, Gemini 4 Argon `medium`, Gemini 3.5 Flash-Lite `minimal`,
+  DeepSeek undocumented; `docs/models.md`).
+- **"Showing Opus 5.5's progress updates doesn't change its behaviour" as
+  tested.** It rests on Anthropic's documentation (`display` "controls how
+  thinking content is returned"; the signature is identical whichever value
+  is set). Nothing here measures it.
 - **One price for `gemini-4-argon` across the whole run.** Google doubles it
   on December 1, 2026; a run on or after that date needs `models.yaml`
   updated first.
-- **"Both judges run at temperature 0 and 0.7."** Unverified for GPT-5.1:
-  OpenAI's model page is silent on sampling parameters, and community reports
-  say GPT-5-series reasoning models reject `temperature`.
-- **"Self-preference is ruled out."** The primary judge shares a family with
-  one model under test (`claude-opus-5.5`), down from two; that reduces the
-  risk, it doesn't remove it.
+- **"The primary judge's verdicts are temperature 0" or "its agreement is API
+  determinism".** It runs at the provider's default sampling; its vote
+  agreement is sampling stability.
+- **"The cross-family judge runs at temperature 0 and 0.7."** Unverified for
+  GPT-5.1: OpenAI's model page is silent on sampling parameters, and
+  community reports say GPT-5-series reasoning models reject `temperature`.
+- **"Self-preference is ruled out."** The primary judge is the same model as
+  one model under test (`claude-opus-5.5`), the strongest form of the risk;
+  only the cross-family comparison can show its size.
 - **The failure taxonomy.** It doesn't exist.
 - **A verification gap without its n and sensitivity bound.** When any
   episode lacks a verdict, the paired gap alone can mislead: in the metrics
@@ -744,9 +860,11 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-15 | uncommitted lineup work | Final lineup before `experiment-v1`: `claude-opus-5.5` replaces Opus 5, `gemini-4-argon` (stable) replaces the 3.1 Pro preview, `gemini-3.5-flash-lite` replaces Claude Haiku 4.5; primary judge `claude-opus-4-6`, because current Claude models reject any non-default temperature. Added served-version provenance (3.15, two metrics), provider-native replay, defects 5.14 to 5.16, three engineering decisions, and replaced the Haiku and Gemini-preview guards in section 9 with four current ones. |
-| 2026-10-14 | uncommitted pre-experiment work | Pinned Claude Haiku 4.5 to its dated snapshot and set both judge context windows from cited vendor pages; the smoke suite now covers each judge at both temperatures and each model with tools; the four judge mutations are stored in the planted-bug table; single-vote judging with an API-agreement sample, dry-run judging estimates and an overflow preflight. Added defects 5.11 (a floating alias), 5.12 (the OpenRouter key) and 5.13 (planted bugs measured against a red baseline), two engineering decisions, the 3.6 source rule, and replaced two section 9 guards with three current ones. |
-| 2026-10-13 | uncommitted report work | `consequence/report.py` now lays out `consequence/metrics.py` per model and computes nothing; added the judging cost (3.13) and episode outcome (3.14) definitions, two metrics behind them, the "report computes nothing" engineering decision, and defect 5.10 (the old report pooled every model). Metric count 15 to 17. |
-| 2026-10-13 | uncommitted metrics work | Added `consequence/metrics.py` as the only source of reported numbers. Rewrote section 3 so every definition matches the code and names its `RunMetrics` call: new definitions for the trap behaviour split (3.10), cross-judge agreement over the intersection (3.8) and grading coverage (3.11), plus time and turns (3.12). Corrected three earlier definitions to match the metrics as specified: the verification gap is a difference in percentage points, not a share of judge passes; collateral is over state passes only; cost per solved task is per category, traps included. Added the no-verdict sensitivity bound and the single metrics module to section 4, a scale fact, and section 9 guards. |
-| 2026-10-11 | uncommitted judge work | Added the LLM judge: scale facts (judge models), section 3 definitions for the verification gap, judge API agreement, stability, cross-family comparison and the new 3.10 trap behaviour split, three engineering decisions, the reframed adversarial row (structural limits), a DRAFT bullet, and section 9 guards. Corrected 3.6, which wrongly defined judge API agreement as judge-vs-state agreement. |
-| 2026-10-11 | `c66c78d` plus uncommitted hardening work | Created. Backfilled from every commit, `a033e8e` through `c66c78d`, and the hardening work in progress. Added the ledger check (`consequence/ledger.py`) and the planted-bug harness whose output section 6 cites. |
+| 2026-10-17 | `final prep` | One agent output cap of 16,000 tokens for every model under test, and every agent at its provider's default reasoning settings, both recorded as experimental conditions. Added 3.17 (episodes cut off by the cap, metric 21), two engineering decisions, defect 5.19 (a 4,096 cap with thinking, and Gemini cut-offs hidden by the Google adapter) and two section 9 guards. |
+| 2026-10-15 | `final prep` | Primary judge `claude-opus-5-5` at the provider's default sampling, chosen as the strongest available (supersedes `claude-opus-4-6`): rewrote 3.6 and 3.7 for sampling stability, added 3.16 (visible narration, metric 20) and five engineering decisions, replaced the "chosen for its controls" decision, updated 5.14 to 5.16 to their commit, added defects 5.17 and 5.18 (found by the new offline SDK tests), and rewrote four section 9 guards. Smoke tests 9 to 8: the primary judge runs under one condition. Planted bugs re-measured: the judge-skips-errored-episodes bug is now caught by 11 offline tests, up from 10 (the new provider-default test). |
+| 2026-10-15 | `f399150` | Final lineup before `experiment-v1`: `claude-opus-5.5` replaces Opus 5, `gemini-4-argon` (stable) replaces the 3.1 Pro preview, `gemini-3.5-flash-lite` replaces Claude Haiku 4.5; primary judge `claude-opus-4-6`, because current Claude models reject any non-default temperature. Added served-version provenance (3.15, two metrics), provider-native replay, defects 5.14 to 5.16, three engineering decisions, and replaced the Haiku and Gemini-preview guards in section 9 with four current ones. |
+| 2026-10-14 | `7c19937` | Pinned Claude Haiku 4.5 to its dated snapshot and set both judge context windows from cited vendor pages; the smoke suite now covers each judge at both temperatures and each model with tools; the four judge mutations are stored in the planted-bug table; single-vote judging with an API-agreement sample, dry-run judging estimates and an overflow preflight. Added defects 5.11 (a floating alias), 5.12 (the OpenRouter key) and 5.13 (planted bugs measured against a red baseline), two engineering decisions, the 3.6 source rule, and replaced two section 9 guards with three current ones. |
+| 2026-10-13 | `60c72a6` | `consequence/report.py` now lays out `consequence/metrics.py` per model and computes nothing; added the judging cost (3.13) and episode outcome (3.14) definitions, two metrics behind them, the "report computes nothing" engineering decision, and defect 5.10 (the old report pooled every model). Metric count 15 to 17. |
+| 2026-10-13 | `0d1d696` | Added `consequence/metrics.py` as the only source of reported numbers. Rewrote section 3 so every definition matches the code and names its `RunMetrics` call: new definitions for the trap behaviour split (3.10), cross-judge agreement over the intersection (3.8) and grading coverage (3.11), plus time and turns (3.12). Corrected three earlier definitions to match the metrics as specified: the verification gap is a difference in percentage points, not a share of judge passes; collateral is over state passes only; cost per solved task is per category, traps included. Added the no-verdict sensitivity bound and the single metrics module to section 4, a scale fact, and section 9 guards. |
+| 2026-10-11 | `0be69bc` | Added the LLM judge: scale facts (judge models), section 3 definitions for the verification gap, judge API agreement, stability, cross-family comparison and the new 3.10 trap behaviour split, three engineering decisions, the reframed adversarial row (structural limits), a DRAFT bullet, and section 9 guards. Corrected 3.6, which wrongly defined judge API agreement as judge-vs-state agreement. |
+| 2026-10-11 | `6d92c81` | Created. Backfilled from every commit, `a033e8e` through `c66c78d`, and the hardening work in progress. Added the ledger check (`consequence/ledger.py`) and the planted-bug harness whose output section 6 cites. |

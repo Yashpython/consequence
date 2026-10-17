@@ -16,6 +16,24 @@
 #     price, and for the reasoning behind each of the 5 model choices.
 #   - max_turns is an optional override of the harness default (20); omit
 #     to use the default.
+#   - agent_max_output_tokens (below) is the output cap on every agent turn,
+#     the same for every model under test; a per-model max_output_tokens
+#     under models: is refused. Judges set their own max_output_tokens.
+#   - options are adapter-specific settings, passed to the adapter as they
+#     are (consequence/providers/registry.py make_provider).
+
+# One output cap per agent turn for every model under test, so every model
+# runs under the same condition. Thinking counts toward it on every reasoning
+# model here ("including thought tokens", Google; "Thinking counts toward
+# max_tokens", Anthropic), and a reasoning model that spends a small cap on
+# thinking returns no tool call and fails for a reason unrelated to its
+# behaviour. 16,000 is below every documented maximum output (Claude Opus 5.5
+# 128K; GPT-5.1 128,000; Gemini 4 Argon and Gemini 3.5 Flash-Lite 65,536;
+# DeepSeek V3.2 via OpenRouter: not documented, the smoke test checks it) and
+# below the anthropic SDK's non-streaming limit (21,333). Only generated
+# tokens are billed. Turns that still hit it are counted per model:
+# metrics.output_capped_episodes.
+agent_max_output_tokens: 16000
 
 models:
   # The current Opus. Dateless but pinned: "Every Claude model ID is a pinned
@@ -28,6 +46,15 @@ models:
     input_price_per_million: 4.00
     output_price_per_million: 20.00
     price_note: "replaces claude-opus-5 ($5 / $25): 20% cheaper on input and output"
+    # Its notes between tool calls come back as thinking blocks, empty at the
+    # default display "omitted"; other models write them as text. "updates"
+    # (beta) "returns the progress updates while reasoning stays hidden", and
+    # display "controls how thinking content is returned in API responses";
+    # "The signature field is identical whichever display value you set."
+    # https://platform.claude.com/docs/en/build-with-claude/thinking#controlling-thinking-display
+    # https://platform.claude.com/docs/en/models/opus-5-5/migration-guide#text-between-tool-calls
+    options:
+      thinking_display: updates
 
   - id: gpt-5.1
     provider: openai
@@ -84,28 +111,46 @@ models:
 #     a transcript is never cut to fit.
 #   - Exactly one judge is primary: it grades every episode. The others are
 #     run on a subset with `consequence grade --judge-model`.
-#   - The primary judge must accept a temperature (0 and 0.7). Current Claude
-#     models (Opus 4.7 and later) reject any non-default temperature with a
-#     400; Opus 4.6 accepts one while thinking is off, which it is by default.
+#   - sampling: `temperature` (the default) sends an explicit temperature: 0
+#     for verdicts, 0.7 for the stability subset. `provider_default` never
+#     sends one, for a model that rejects it: its votes are draws at the
+#     provider's default sampling, and their agreement is sampling stability
+#     (judge_vote_agreement). Current Claude models (Opus 4.7 and later)
+#     reject "non-default temperature, top_p, or top_k values" with a 400.
+#   - The primary judge is the strongest model available, whatever it
+#     accepts: an older, more credulous judge would inflate the verification
+#     gap. See docs/judge-methodology.md.
 #   - The primary judge is an Anthropic model, the same family as one model
 #     under test (claude-opus-5.5), a known self-preference risk. The OpenAI
 #     judge is the cross-family check. See docs/judge-methodology.md.
 judges:
-  - id: judge-claude-opus-4.6
+  - id: judge-claude-opus-5.5
     provider: anthropic
-    # Pinned (dateless from the 4.6 generation on). "On older models, the
-    # restriction applies only while thinking is on: temperature and top_k
-    # are incompatible with thinking" -- and on Opus 4.6 "thinking is off until
-    # you set thinking: {type: "adaptive"}", which the adapter never sets.
-    # (https://platform.claude.com/docs/en/build-with-claude/thinking)
-    # Status "Active (legacy)", retirement "Not sooner than February 5, 2027".
-    api_model: claude-opus-4-6
-    # "$5 / MTok" input, "$25 / MTok" output, checked 2026-10-15:
-    # https://platform.claude.com/docs/en/models/opus-4-6/overview
-    input_price_per_million: 5.00
-    output_price_per_million: 25.00
-    # "Context window: 1M tokens" for claude-opus-4-6, same page.
+    # The current Opus, the model under test of the same name. Model ID,
+    # "Context window: 1M tokens" and "Max output: 128K tokens", checked
+    # 2026-10-15: https://platform.claude.com/docs/en/models/opus-5-5/overview
+    api_model: claude-opus-5-5
+    # Copied from the claude-opus-5.5 entry above (a test checks they match).
+    input_price_per_million: 4.00
+    output_price_per_million: 20.00
     context_window_tokens: 1000000
+    # Thinking is always on and counts toward the cap: room for it at the
+    # default effort plus the verdict. Billed on tokens used, not on the cap.
+    # At most 21,333: the pinned anthropic SDK refuses a non-streaming request
+    # whose max_tokens could run past 10 minutes (3600 s x max_tokens /
+    # 128,000 > 600 s), which tests/test_provider_sdk.py caught at 32,000.
+    max_output_tokens: 16000
+    sampling: provider_default
+    options:
+      # "Claude Opus 5.5 doesn't support forced tool use", so the verdict
+      # comes back as structured output (output_config.format, a JSON schema)
+      # instead of a record_verdict call: "use tool_choice auto with strict
+      # tool use or structured outputs instead". Structured outputs work with
+      # thinking: "Grammars apply only to Claude's direct output, not to ...
+      # thinking tags".
+      # https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5#forced-tool-use-is-not-supported
+      # https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+      structured_output: true
     primary: true
 
   - id: judge-gpt-5.1
@@ -117,3 +162,6 @@ judges:
     # "400,000 context window" for gpt-5.1 / gpt-5.1-2025-11-13, checked
     # 2026-10-14: https://developers.openai.com/api/docs/models/gpt-5.1
     context_window_tokens: 400000
+    # Unverified: whether gpt-5.1 accepts a temperature. If the judge smoke
+    # tests show it rejects one, change this to provider_default.
+    sampling: temperature

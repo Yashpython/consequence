@@ -56,7 +56,7 @@ def build_report(m: RunMetrics, *, pass_k: tuple[int, ...] = ()) -> dict[str, An
         "judging_cost": {j: asdict(m.judge_cost(j)) for j in judges},
         "judge_agreement": {
             j: {"api_temperature_0": asdict(m.judge_api_agreement(j)),
-                "stability_temperature_0_7": asdict(m.judge_vote_agreement(j))}
+                "sampling_stability": asdict(m.judge_vote_agreement(j))}
             for j in judges
         },
         "models": {model: _model(m, model, judges, primary, pass_k) for model in m.models()},
@@ -74,6 +74,8 @@ def _model(m: RunMetrics, model: str, judges: list[str], primary: str | None,
         "cost_per_solved_task": _per_category(m.cost_per_solved_task(model)),
         "wall_clock_seconds": _per_category(m.latency_stats(model)),
         "turns_on_passes": _per_category(m.turn_stats(model)),
+        "narration_chars": asdict(m.narration_chars(model)),
+        "output_capped": _per_category(m.output_capped_episodes(model)),
         "incomplete_but_verifier_satisfied": m.incomplete_but_verifier_satisfied(model),
         "judges": {
             j: {"pass_rate": _per_category(m.pass_rate_judge(model, j)),
@@ -163,8 +165,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         ))
         lines.extend(["", "## Judge vote agreement", "",
                       ("API agreement (temperature 0) measures provider nondeterminism, not "
-                       "judge reliability; stability (temperature 0.7) is the reliability "
-                       "figure."), ""])
+                       "judge reliability. Sampling stability is the reliability figure: "
+                       "votes at temperature 0.7 on a subset, or, for a judge that rejects "
+                       "a temperature, its three votes on every episode at the provider's "
+                       "default sampling."), ""])
         lines.extend(_table(
             ["judge", "condition", "episodes", "mean", "unanimous", "95% CI", "3/3", "2/3",
              "1/3", "no verdict"],
@@ -173,8 +177,10 @@ def render_markdown(report: dict[str, Any]) -> str:
               str(a["distribution"]["3/3"]), str(a["distribution"]["2/3"]),
               str(a["distribution"]["1/3"]), str(a["no_verdict"])]
              for j, agreement in report["judge_agreement"].items()
-             for label, a in (("API, temperature 0", agreement["api_temperature_0"]),
-                              ("stability, 0.7", agreement["stability_temperature_0_7"]))],
+             for label, a in (
+                 ("API, temperature 0", agreement["api_temperature_0"]),
+                 (f"sampling stability, {agreement['sampling_stability']['condition'] or 'none'}",
+                  agreement["sampling_stability"]))],
         ))
     for model, figures in report["models"].items():
         lines.extend(_model_markdown(model, figures, report["primary_judge"]))
@@ -220,6 +226,17 @@ def _model_markdown(model: str, f: dict[str, Any], primary: str | None) -> list[
           _num(f["wall_clock_seconds"][cat]["p90"], ".1f"),
           _num(f["turns_on_passes"][cat]["median"]), _num(f["turns_on_passes"][cat]["p90"])]
          for cat, cost in f["cost_per_solved_task"].items()]))
+    lines.extend(["", ("### Episodes with a turn cut off by the output cap (counted as they "
+                       "scored; a cut-off turn may carry no tool call)"), ""])
+    lines.extend(_table(
+        ["category", "share", "95% CI (Wilson)", "episodes of n"],
+        [[cat, _pct(r["value"]), _ci(r["ci_low"], r["ci_high"]), f"{r['successes']} of {r['n']}"]
+         for cat, r in f["output_capped"].items()]))
+    narration = f["narration_chars"]
+    lines.extend(["", (f"Visible narration (the agent's own text, not tool calls or results), "
+                       f"characters per episode: median {_num(narration['median'], '.0f')}, "
+                       f"p90 {_num(narration['p90'], '.0f')}, over {narration['n']} "
+                       "episodes. Less narration gives the judge less evidence.")])
     satisfied = f["incomplete_but_verifier_satisfied"]
     counts = ", ".join(f"{cat} {n}" for cat, n in satisfied.items())
     lines.extend(["", ("Did not complete, but the final state satisfied the verifier (all "

@@ -36,7 +36,7 @@ DEFAULT_DB_PATH = "results/results.db"
 # Bump on any schema change. A results.db with a different version is refused
 # outright. There are no migrations: no real runs exist yet, so the remedy is
 # to delete the file and re-run.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 
 class ResultsSchemaError(RuntimeError):
@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS episodes (
     served_model  TEXT
 );
 
+-- Every agent (assistant) turn records why it ended: stop_reason in the
+-- provider's own words, and output_capped, the provider-neutral flag for a
+-- turn cut off by the output cap (metrics.output_capped_episodes). Both are
+-- required on assistant turns and absent on every other role.
 CREATE TABLE IF NOT EXISTS transcripts (
     id            INTEGER PRIMARY KEY,
     episode_id    INTEGER NOT NULL REFERENCES episodes (id),
@@ -98,7 +102,11 @@ CREATE TABLE IF NOT EXISTS transcripts (
     tool_name     TEXT,
     tool_args     TEXT,
     tool_result   TEXT,
-    raw_response  TEXT
+    raw_response  TEXT,
+    stop_reason   TEXT,
+    output_capped INTEGER CHECK (output_capped IN (0, 1)),
+    CHECK ((role = 'assistant') = (output_capped IS NOT NULL)),
+    CHECK ((role = 'assistant') = (stop_reason IS NOT NULL))
 );
 
 -- The state an episode left, stored verbatim so a grader can be re-run
@@ -143,10 +151,14 @@ CREATE TABLE IF NOT EXISTS state_diffs (
 --
 -- Judge rows (see consequence/graders/judge.py): passed is the majority of
 -- three votes; behaviour, confidence and the token/cost columns describe the
--- judging, never the episode. Agreement among the three votes is stored under
--- a name that says what it measures: judge_api_agreement only at temperature 0
--- (API-level nondeterminism), judge_vote_agreement only above 0 (sampling
--- stability). judge_cost_usd is judging spend, kept out of episodes.cost_usd.
+-- judging, never the episode. judge_sampling is how the votes were drawn:
+-- 'temperature' (judge_temperature says which) or 'provider_default' (no
+-- temperature sent, because the judge rejects one; judge_temperature NULL).
+-- Agreement among the three votes is stored under a name that says what it
+-- measures: judge_api_agreement only at temperature 0 (API-level
+-- nondeterminism), judge_vote_agreement only above 0 or at the provider's
+-- default (sampling stability). judge_cost_usd is judging spend, kept out of
+-- episodes.cost_usd.
 CREATE TABLE IF NOT EXISTS gradings (
     id                   INTEGER PRIMARY KEY,
     episode_id           INTEGER NOT NULL REFERENCES episodes (id),
@@ -163,6 +175,7 @@ CREATE TABLE IF NOT EXISTS gradings (
                                                    'false_claim', 'acted_incorrectly',
                                                    'completed')),
     confidence           REAL CHECK (confidence BETWEEN 0 AND 1),
+    judge_sampling       TEXT CHECK (judge_sampling IN ('temperature', 'provider_default')),
     judge_temperature    REAL,
     judge_api_agreement  REAL CHECK (judge_api_agreement BETWEEN 0 AND 1),
     judge_vote_agreement REAL CHECK (judge_vote_agreement BETWEEN 0 AND 1),
@@ -181,10 +194,27 @@ CREATE TABLE IF NOT EXISTS gradings (
     CHECK (status != 'graded' OR (error_traceback IS NULL AND error_reason IS NULL)),
     CHECK ((grader IN ('llm_judge', 'llm_judge_stability', 'llm_judge_api_agreement'))
            = (judge_model != '')),
-    CHECK (judge_api_agreement IS NULL OR judge_temperature = 0),
-    CHECK (judge_vote_agreement IS NULL OR judge_temperature > 0)
+    CHECK ((judge_model != '') = (judge_sampling IS NOT NULL)),
+    CHECK ((judge_sampling = 'temperature') = (judge_temperature IS NOT NULL)
+           OR judge_sampling IS NULL),
+    CHECK (judge_sampling IS NOT NULL OR judge_temperature IS NULL),
+    CHECK (judge_api_agreement IS NULL
+           OR (judge_sampling = 'temperature' AND judge_temperature = 0)),
+    CHECK (judge_vote_agreement IS NULL OR judge_sampling = 'provider_default'
+           OR judge_temperature > 0),
+    CHECK (grader != 'llm_judge_api_agreement'
+           OR (judge_sampling = 'temperature' AND judge_temperature = 0)),
+    CHECK (grader != 'llm_judge_stability' OR judge_sampling = 'temperature')
 );
 """
+
+
+def _sampling(temperature: float | None) -> dict[str, Any]:
+    """A judge row's sampling columns: an explicit temperature, or None for
+    the provider's default."""
+    if temperature is None:
+        return {"judge_sampling": "provider_default", "judge_temperature": None}
+    return {"judge_sampling": "temperature", "judge_temperature": temperature}
 
 
 def _now() -> str:
@@ -362,7 +392,9 @@ class Results:
         `turns` is the full ordered conversation: each item needs
         turn_index, role, and optionally content, tool_name, tool_args,
         tool_result, raw_response (all JSON-encoded if not already a
-        string). If any turn is malformed, none of them are written.
+        string). An assistant turn also needs stop_reason and output_capped
+        (the schema refuses one without them). If any turn is malformed, none
+        of them are written.
         """
         rows = [
             (
@@ -374,6 +406,8 @@ class Results:
                 _json(turn.get("tool_args")),
                 _json(turn.get("tool_result")),
                 _json(turn.get("raw_response")),
+                turn.get("stop_reason"),
+                None if turn.get("output_capped") is None else int(turn["output_capped"]),
             )
             for turn in turns
         ]
@@ -382,8 +416,8 @@ class Results:
                 """
                 INSERT INTO transcripts (
                     episode_id, turn_index, role, content, tool_name, tool_args, tool_result,
-                    raw_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_response, stop_reason, output_capped
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -497,7 +531,7 @@ class Results:
         passed: bool,
         behaviour: str | None,
         confidence: float | None,
-        temperature: float,
+        temperature: float | None,
         agreement: float | None,
         input_tokens: int,
         output_tokens: int,
@@ -505,15 +539,17 @@ class Results:
         detail_json: Any = None,
         served_model: str | None = None,
     ) -> int:
-        """A judge's majority verdict. `agreement` is stored as
-        judge_api_agreement at temperature 0 and as judge_vote_agreement above
-        it: the same arithmetic measures different things (see
-        docs/judge-methodology.md), so it never shares a column. It is None
-        for a single-vote verdict, which measures no agreement at all."""
+        """A judge's majority verdict. temperature None means the votes ran at
+        the provider's default sampling (judge_sampling 'provider_default').
+        `agreement` is stored as judge_api_agreement at temperature 0 and as
+        judge_vote_agreement above it or at the provider's default: the same
+        arithmetic measures different things (see docs/judge-methodology.md),
+        so it never shares a column. It is None for a single-vote verdict,
+        which measures no agreement at all."""
         at_zero = temperature == 0
         return self._upsert_grading(
             episode_id, grader, judge_model, status="graded", passed=int(passed),
-            behaviour=behaviour, confidence=confidence, judge_temperature=temperature,
+            behaviour=behaviour, confidence=confidence, **_sampling(temperature),
             judge_api_agreement=agreement if at_zero else None,
             judge_vote_agreement=None if at_zero else agreement,
             judge_input_tokens=input_tokens, judge_output_tokens=output_tokens,
@@ -528,7 +564,7 @@ class Results:
         judge_model: str,
         *,
         reason: str,
-        temperature: float,
+        temperature: float | None,
         input_tokens: int = 0,
         output_tokens: int = 0,
         cost_usd: float | None = 0.0,
@@ -540,7 +576,7 @@ class Results:
         recorded, so judging cost is complete even when judging fails."""
         return self._upsert_grading(
             episode_id, grader, judge_model, status="judge_error", error_reason=reason,
-            error_traceback=error_traceback, judge_temperature=temperature,
+            error_traceback=error_traceback, **_sampling(temperature),
             judge_input_tokens=input_tokens, judge_output_tokens=output_tokens,
             judge_cost_usd=cost_usd, served_model=served_model,
             detail_json=_json(detail_json),
@@ -548,7 +584,7 @@ class Results:
 
     _GRADING_COLUMNS = (
         "status", "passed", "verifier_verdict_raw", "behaviour", "confidence",
-        "judge_temperature", "judge_api_agreement", "judge_vote_agreement",
+        "judge_sampling", "judge_temperature", "judge_api_agreement", "judge_vote_agreement",
         "judge_input_tokens", "judge_output_tokens", "judge_cost_usd", "served_model",
         "error_reason",
         "error_traceback", "detail_json", "graded_at",

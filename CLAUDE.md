@@ -36,7 +36,7 @@ own transcripts. Status: in development.
 ## Commands
 
 ```bash
-pip install -e ".[dev]"          # install package + pytest, ruff, python-dotenv
+pip install -e ".[dev,providers]"  # package, pytest, ruff, dotenv, vendor SDKs (as CI)
 cp .env.example .env             # then fill in values you need
 
 ruff check .                     # lint (line length 100, default rule set)
@@ -170,8 +170,22 @@ the raw response by each adapter's `served_model_from_raw`). Episodes and
 judge gradings store `served_model`; a configured model served by more than
 one version in a run is flagged by `grade` (and logged in
 `docs/experiment-log.md`) and by `report`, never blocking. The primary judge
-must accept a temperature: current Claude models (Opus 4.7+) reject any
-non-default one, so it is `claude-opus-4-6` with thinking off.
+is the strongest model available, `claude-opus-5-5`; it rejects any
+temperature, so its `sampling` is `provider_default` (no temperature sent,
+rows record `judge_sampling`, its three votes' agreement is
+`judge_vote_agreement`), and it rejects forced tool use, so it answers
+through structured outputs (`options: structured_output`). As an agent it
+runs with `thinking_display: updates` so its notes between tool calls reach
+the transcript. `models.yaml` `options:` go to the adapter's constructor.
+Every model under test runs at one output cap, `agent_max_output_tokens` in
+`models.yaml` (a per-model `max_output_tokens` under `models:` is refused),
+and at its provider's default reasoning settings (no effort/thinking
+parameter is ever sent to an agent). Every assistant transcript row stores
+`stop_reason` (verbatim) and `output_capped` (each adapter's mapping of its
+vendor's cap stop); the schema requires both.
+`tests/test_provider_sdk.py` runs every smoke-test call through the real SDKs
+offline (CI installs `.[dev,providers]`); never send an SDK a keyword it
+lacks (Anthropic's `create()` has no `temperature`: it goes in `extra_body`).
 `db.connect()` pins the Postgres session time zone to UTC; every timestamp
 column is `timestamptz` and every seed timestamp literal carries an explicit
 offset (`tests/test_timestamps.py` enforces both).

@@ -155,7 +155,8 @@ def run_episode(
             if turn.served_model:
                 served.add(turn.served_model)
 
-            _record_turn("assistant", content=turn.text, raw_response=turn.raw_response)
+            _record_turn("assistant", content=turn.text, raw_response=turn.raw_response,
+                         stop_reason=turn.stop_reason, output_capped=turn.output_capped)
             messages.append(
                 {
                     "role": "assistant",

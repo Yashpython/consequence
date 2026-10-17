@@ -75,6 +75,8 @@ def test_round_trip_transcripts(results):
         {
             "turn_index": 1,
             "role": "assistant",
+            "stop_reason": "tool_use",
+            "output_capped": False,
             "content": "Looking for duplicates.",
             "tool_name": "query_invoices",
             "tool_args": {"supplier_id": 1},

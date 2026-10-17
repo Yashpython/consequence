@@ -12,10 +12,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # The vendor SDKs too: tests/test_provider_sdk.py makes every smoke-test
+      # call through them against a fake transport (no key, no network), so a
+      # request a pinned SDK would refuse fails here rather than in a billed run.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,providers]"
       - name: Lint
         run: ruff check .
       - name: Test

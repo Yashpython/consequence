@@ -1,5 +1,19 @@
 # Methodology
 
+## Experimental conditions
+
+Every model under test runs under the same two conditions, documented with
+their sources in `docs/models.md` ("Experimental conditions"):
+
+- **A uniform output cap of 16,000 tokens per agent turn**
+  (`agent_max_output_tokens` in `consequence/models.yaml`; a per-model cap is
+  refused). Thinking counts toward it, so a cap too small for a reasoning
+  model would score it as failing for running out of room, not for what it
+  did. Every agent turn stores its stop reason and whether it hit the cap,
+  and `output_capped_episodes` reports, per model, the episodes where one did.
+- **Each provider's default reasoning settings.** No effort, reasoning-effort,
+  thinking-level or thinking-budget parameter is sent to any agent.
+
 ## Test validation
 
 A green test suite only means something if it fails when the code is wrong.
@@ -31,15 +45,15 @@ python -m consequence.planted_bugs --write-doc
 <!-- planted-bugs:start -->
 | Planted bug | What it does | Offline tests failing | Live tests failing |
 |---|---|---|---|
-| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 27 of 655 | 1 of 332 |
-| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 14 of 655 | 1 of 332 |
-| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 655 | 5 of 332 |
-| `judge_skips_errored_episodes` | The judge grades only completed episodes, so its denominator differs from the state verifier's. | 10 of 655 | 0 of 332 |
-| `judge_truncates_tool_results` | The transcript shown to the judge cuts each tool result at 2,000 characters. | 3 of 655 | 0 of 332 |
-| `judge_skips_overflow_check` | The judge never checks its context window, so an oversized transcript is sent instead of recorded as context_overflow. | 2 of 655 | 0 of 332 |
-| `judge_imports_state_diff` | judge.py imports the state diff module, so the transcript-only guarantee is no longer structural. | 1 of 655 | 0 of 332 |
+| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 27 of 724 | 1 of 332 |
+| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 14 of 724 | 1 of 332 |
+| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 724 | 5 of 332 |
+| `judge_skips_errored_episodes` | The judge grades only completed episodes, so its denominator differs from the state verifier's. | 11 of 724 | 0 of 332 |
+| `judge_truncates_tool_results` | The transcript shown to the judge cuts each tool result at 2,000 characters. | 3 of 724 | 0 of 332 |
+| `judge_skips_overflow_check` | The judge never checks its context window, so an oversized transcript is sent instead of recorded as context_overflow. | 2 of 724 | 0 of 332 |
+| `judge_imports_state_diff` | judge.py imports the state diff module, so the transcript-only guarantee is no longer structural. | 1 of 724 | 0 of 332 |
 
-Measured on 2026-10-16, at commit `7c19937` plus uncommitted changes (last commit 2026-10-15) by `python -m consequence.planted_bugs --write-doc`.
+Measured on 2026-10-17, at commit `f399150` plus uncommitted changes (last commit 2026-10-15) by `python -m consequence.planted_bugs --write-doc`.
 <!-- planted-bugs:end -->
 
 ### Reading the table

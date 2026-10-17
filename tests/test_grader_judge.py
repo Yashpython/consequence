@@ -19,6 +19,8 @@ import re
 import pytest
 import yaml
 from helpers import (
+    DEFAULT_SAMPLING_JUDGE,
+    DEFAULT_SAMPLING_JUDGES,
     SECOND_JUDGE,
     TEST_JUDGE,
     TEST_JUDGES,
@@ -284,7 +286,7 @@ def test_an_oversized_transcript_is_a_context_overflow_never_truncated(tmp_path)
             {"turn_index": 0, "role": "user", "content": "Void the duplicate invoice."},
             {"turn_index": 1, "role": "tool", "tool_name": "query_invoices", "tool_args": {},
              "tool_result": {"ok": True, "data": "x" * 1_000_000, "error": None}},
-            {"turn_index": 2, "role": "assistant", "content": "Done."},
+            {"turn_index": 2, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Done."},
         ])
         estimate = judge.estimate_tokens(build_messages(results.transcript_for_episode(huge)))
         assert estimate > TEST_JUDGE.context_window_tokens  # genuinely oversized
@@ -438,6 +440,112 @@ def test_vote_options_are_validated_before_any_call(run, capsys, monkeypatch, fl
     assert _cli_grade(run, *flags, factory=no_calls) == 2
     assert message in capsys.readouterr().err
     assert _rows(run["db"]) == {}
+
+
+# -- a judge that rejects a temperature: the provider's default sampling ---------------------
+
+
+def test_a_provider_default_judge_s_votes_are_stored_as_sampling_stability(run):
+    """No temperature is sent and none is recorded: the row says
+    'provider_default', and the three votes' agreement is sampling
+    stability (judge_vote_agreement), never API agreement."""
+    with Results(run["db"]) as results:
+        stub, summary = _judge(results, run["run_id"], spec=DEFAULT_SAMPLING_JUDGE,
+                               temperature=None)
+    assert summary.temperature is None
+    assert len(stub.requests) == 3 * len(EPISODES)  # three votes on every episode
+    rows = _rows(run["db"])
+    assert set(rows) == set(run["ids"].values())
+    for row in rows.values():
+        assert (row["judge_sampling"], row["judge_temperature"]) == ("provider_default", None)
+        assert row["judge_vote_agreement"] is not None and row["judge_api_agreement"] is None
+
+
+def test_a_temperature_judge_s_rows_say_so(run):
+    with Results(run["db"]) as results:
+        _judge(results, run["run_id"])
+    assert {(r["judge_sampling"], r["judge_temperature"])
+            for r in _rows(run["db"]).values()} == {("temperature", 0)}
+
+
+@pytest.mark.parametrize("spec, kwargs, message", [
+    (DEFAULT_SAMPLING_JUDGE, {"temperature": 0.0}, "rejects a temperature"),
+    (DEFAULT_SAMPLING_JUDGE, {"temperature": None, "grader": STABILITY_GRADER},
+     "already its stability measurement"),
+    (DEFAULT_SAMPLING_JUDGE, {"temperature": None, "grader": judge.API_AGREEMENT_GRADER},
+     "already its stability measurement"),
+    (DEFAULT_SAMPLING_JUDGE, {"temperature": None, "votes": 1}, "needs 3 votes"),
+    (TEST_JUDGE, {"temperature": None}, "none given"),
+    (TEST_JUDGE, {"temperature": 0.0, "grader": STABILITY_GRADER}, "runs at temperature 0.7"),
+    (TEST_JUDGE, {"temperature": 0.7, "grader": judge.API_AGREEMENT_GRADER},
+     "runs at temperature 0"),
+])
+def test_a_judge_runs_only_under_a_condition_it_accepts(run, spec, kwargs, message):
+    with Results(run["db"]) as results, pytest.raises(JudgeConfigError, match=message):
+        _judge(results, run["run_id"], spec=spec, **kwargs)
+    assert _rows(run["db"]) == {}
+
+
+@pytest.mark.parametrize("grader, sampling, temperature, column", [
+    ("llm_judge", "provider_default", None, "judge_api_agreement"),
+    ("llm_judge_stability", "provider_default", None, "judge_vote_agreement"),
+    ("llm_judge_api_agreement", "provider_default", None, "judge_api_agreement"),
+    ("llm_judge", "provider_default", 0.0, "judge_vote_agreement"),
+    ("llm_judge", "temperature", None, "judge_vote_agreement"),
+    ("llm_judge", "temperature", 0.0, "judge_vote_agreement"),
+])
+def test_the_schema_refuses_agreement_under_the_wrong_name(run, grader, sampling, temperature,
+                                                           column):
+    import sqlite3
+
+    episode = run["ids"]["completed"]
+    with Results(run["db"]) as results, pytest.raises(sqlite3.IntegrityError):
+        results._upsert_grading(episode, grader, "judge-x", status="graded", passed=1,
+                                judge_sampling=sampling, judge_temperature=temperature,
+                                **{column: 1.0})
+
+
+def test_cli_grades_a_provider_default_judge_without_a_temperature(run, capsys, monkeypatch):
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: DEFAULT_SAMPLING_JUDGES)
+    made = []
+    assert _cli_grade(run, factory=stub_judge_factory(evidence_judge, made)) == 0
+    assert [j.temperature for j in made] == [None]
+    assert "provider default sampling" in capsys.readouterr().out
+    assert {r["judge_sampling"] for r in _rows(run["db"]).values()} == {"provider_default"}
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--judge-temperature", "0"], "rejects a temperature"),
+    (["--judge-stability-subset", "2"], "rejects a temperature"),
+    (["--judge-votes", "1"], "needs 3 votes"),
+    (["--judge-votes", "1", "--api-agreement-subset", "2"], "needs 3 votes"),
+])
+def test_cli_refuses_temperature_options_for_a_provider_default_judge(run, capsys, monkeypatch,
+                                                                      flags, message):
+    monkeypatch.setattr("consequence.cli.load_judge_registry", lambda: DEFAULT_SAMPLING_JUDGES)
+
+    def no_calls(model_id, registry=None, temperature=None):
+        raise AssertionError("a judge was built for an invalid command")
+
+    assert _cli_grade(run, *flags, factory=no_calls) == 2
+    assert message in capsys.readouterr().err
+    assert _rows(run["db"]) == {}
+
+
+def test_the_overflow_reserve_is_the_judge_s_output_cap():
+    """A judge whose thinking counts toward its output keeps that whole cap
+    free, so a transcript that fits leaves it room to answer."""
+    from dataclasses import replace
+
+    roomy = replace(TEST_JUDGE, max_output_tokens=32_000)
+    assert judge.output_reserve(TEST_JUDGE) == judge.JUDGE_OUTPUT_RESERVE_TOKENS
+    assert judge.output_reserve(roomy) == 32_000
+    messages = judge.build_messages([{"turn_index": 0, "role": "user", "content": "x",
+                                      "tool_name": None, "tool_args": None,
+                                      "tool_result": None}])
+    need = judge.estimate_tokens(messages)
+    assert judge.fits(messages, replace(TEST_JUDGE, context_window_tokens=need + 4096))
+    assert not judge.fits(messages, replace(roomy, context_window_tokens=need + 4096))
 
 
 def test_votes_must_be_odd(run):
@@ -666,3 +774,39 @@ def test_models_yaml_judges_are_pinned_and_priced_like_their_models():
     primary = next(j for j in judges if j.get("primary"))
     # The documented self-preference risk: the primary judge's family is under test.
     assert primary["provider"] in {m["provider"] for m in raw["models"]}
+
+
+def _claude_version(api_model: str) -> tuple[int, int] | None:
+    m = re.fullmatch(r"claude-[a-z]+-(\d+)-(\d+)(?:-\d{8})?", api_model)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+# "Claude Opus 5.5, Claude Sonnet 5.5, Claude Fable 5.1, and Claude Mythos 5.1
+# ... reject forced tool use on every request with a 400 error"
+# (https://platform.claude.com/docs/en/build-with-claude/thinking).
+REJECT_FORCED_TOOL_USE = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
+                          "claude-mythos-5-1"}
+
+
+def test_every_judge_is_configured_for_what_its_model_accepts():
+    """Claude 4.7 and later reject any non-default temperature, so such a
+    judge must run at the provider's default; a model that rejects forced
+    tool use must answer through structured output. A judge configured
+    otherwise would fail on its first call."""
+    from consequence.providers.registry import load_judge_registry
+
+    for spec in load_judge_registry().values():
+        version = _claude_version(spec.api_model) if spec.provider == "anthropic" else None
+        if version is not None and version >= (4, 7):
+            assert spec.sampling == "provider_default", spec.id
+        if spec.api_model in REJECT_FORCED_TOOL_USE:
+            assert spec.options.get("structured_output") is True, spec.id
+        assert spec.max_output_tokens is None or spec.max_output_tokens > 0
+
+
+def test_the_primary_judge_is_the_current_opus_at_its_default_sampling():
+    from consequence.providers.registry import load_judge_registry, primary_judge
+
+    spec = primary_judge(load_judge_registry())
+    assert (spec.id, spec.api_model, spec.sampling) == (
+        "judge-claude-opus-5.5", "claude-opus-5-5", "provider_default")

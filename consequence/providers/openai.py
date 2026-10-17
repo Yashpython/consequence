@@ -108,6 +108,7 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         text=message.content,
         tool_calls=tool_calls,
         stop_reason=choice.finish_reason or "stop",
+        output_capped=choice.finish_reason == "length",
         input_tokens=response.usage.prompt_tokens,
         output_tokens=response.usage.completion_tokens,
         latency_ms=latency_ms,

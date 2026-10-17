@@ -34,7 +34,12 @@ class TurnResult:
 
     text: str | None
     tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
+    # Why the turn ended, in the provider's own words, verbatim.
     stop_reason: str = "end_turn"
+    # The turn stopped because it reached the output cap: each adapter maps its
+    # vendor's own reason (Anthropic "max_tokens", OpenAI-wire "length",
+    # Gemini MAX_TOKENS) to this one provider-neutral flag.
+    output_capped: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
