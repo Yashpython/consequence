@@ -56,7 +56,19 @@ TINY_TRANSCRIPT = [
     {"turn_index": 4, "role": "assistant", "content": "Voided invoice 12.", "tool_name": None,
      "tool_args": None, "tool_result": None},
 ]
-AGENT_TASK = "Look up invoice 12 with the get_invoice tool."
+# A first turn that reasonably elicits reasoning before the tool call: the
+# model has to plan how to check a possible duplicate, not just echo a lookup.
+# Adaptive thinking can still skip reasoning on a request it finds easy; then
+# the round trip is unproven and the test skips (round_trip_unproven).
+AGENT_TASK = ("Invoice 12 might be a duplicate of another invoice from the same supplier, "
+              "or it might not. Before acting, think through what would distinguish a true "
+              "duplicate from a legitimate repeat order, then start by looking up invoice 12 "
+              "with the get_invoice tool.")
+# The adapters whose replay carries reasoning state the vendor requires back
+# verbatim: Claude thinking blocks, Gemini thought signatures. OpenAI-wire
+# Chat Completions (OpenAI, OpenRouter) return none to replay.
+REASONING_REPLAY_PROVIDERS = frozenset({"anthropic", "google"})
+UNPROVEN = "no reasoning produced; round trip unproven"
 TOOL_RESULT = {"ok": True, "error": None,
                "data": {"id": 12, "number": "INV-01-012", "status": "active", "total": "120.00"}}
 
@@ -101,6 +113,13 @@ def with_tool_result(messages: list[dict], turn) -> list[dict]:
     out += [{"role": "tool", "tool_call_id": c.id, "name": c.name, "content": TOOL_RESULT}
             for c in turn.tool_calls]
     return out
+
+
+def round_trip_unproven(spec: ModelSpec, first) -> bool:
+    """For a model whose adapter replays reasoning state, whether the first
+    reply carried none: then the second call proved nothing about the round
+    trip, and the test must skip, never pass."""
+    return spec.provider in REASONING_REPLAY_PROVIDERS and not first.reasoning_state
 
 
 def _require_key(spec: ModelSpec) -> None:
@@ -148,8 +167,13 @@ def test_judge_returns_a_parseable_verdict(condition):
 def test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result(model_id):
     """Two real agent turns with the benchmark's tools attached, exactly as
     the harness sends them: a tool call the harness can execute, then the
-    tool result and one more call. The second call is what proves the
-    adapter's replay (thinking blocks, thought signatures) is accepted."""
+    tool result and one more call.
+
+    For Claude Opus 5.5 and the Gemini models, the first reply must carry
+    reasoning state (thinking blocks, thought signatures) and the second call,
+    carrying it back verbatim, must be accepted: a pass means the round trip
+    was exercised. If the first reply carried none, the test SKIPS with
+    UNPROVEN, never passes."""
     spec = MODELS[model_id]
     _require_key(spec)
     provider = build_model(model_id)
@@ -166,3 +190,5 @@ def test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result(model_
 
     second = _call(spec, lambda: provider.run_turn(with_tool_result(messages, turn), TOOLS))
     assert second.text or second.tool_calls  # the conversation was accepted and continued
+    if round_trip_unproven(spec, turn):
+        pytest.skip(UNPROVEN)

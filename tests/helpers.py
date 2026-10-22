@@ -50,10 +50,10 @@ def record_episode_with_state(
     for tool, args in actions:
         result = env.call_tool(tool, args)
         assert result["ok"], (tool, args)
-        turns.append({"turn_index": len(turns), "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": None})
+        turns.append({"turn_index": len(turns), "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": None})
         turns.append({"turn_index": len(turns), "role": "tool", "tool_name": tool,
                       "tool_args": args, "tool_result": result})
-    turns.append({"turn_index": len(turns), "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Done."})
+    turns.append({"turn_index": len(turns), "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": "Done."})
     before, after = env.snapshots()
     state_diff = diff(before, after)
     episode_id = results.record_episode(

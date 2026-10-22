@@ -39,13 +39,13 @@ adapters for Anthropic, OpenAI, Google and OpenRouter.
 | Tools exposed to the agent | 7 <!-- fact:tools.count --> | MEASURED | `consequence/tools/schema.py` `TOOLS` |
 | Models in the registry | 5 <!-- fact:models.count --> | MEASURED | `consequence/models.yaml` |
 | Judge models (separate `judges:` section) | 2 <!-- fact:judges.count --> | MEASURED | `consequence/models.yaml` `judges:` |
-| Metrics computed from the results DB | 21 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
+| Metrics computed from the results DB | 22 <!-- fact:metrics.count --> | MEASURED | `consequence/metrics.py` `METRICS` |
 | Providers in the registry | 4 <!-- fact:providers.count --> | MEASURED | `provider` field in `consequence/models.yaml` |
 | Trials per (task, model) in the experiment | NOT YET MEASURED | NOT YET MEASURED | Not fixed yet: `consequence run --trials` defaults to one. Set by the first real run. |
 | Total episodes run against real models | NOT YET MEASURED | NOT YET MEASURED | `consequence status` after the first real run. No real run exists. |
-| Offline tests | 747 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
+| Offline tests | 757 <!-- fact:tests.offline --> | MEASURED | `pytest --collect-only -q -m "not live and not smoke"` |
 | Live tests (real Postgres) | 332 <!-- fact:tests.live --> | MEASURED | `pytest --collect-only -q -m live` |
-| Smoke tests (billed API calls) | 8 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`: each judge under each condition it runs under (the primary judge once, at the provider's default; the cross-family judge at 0 and 0.7), each model under test two tool-calling turns. Never run; see section 9. |
+| Smoke tests (billed API calls) | 8 <!-- fact:tests.smoke --> | MEASURED | `pytest --collect-only -q -m smoke`: each judge under each condition it runs under (the primary judge once, at the provider's default; the cross-family judge at 0 and 0.7), each model under test two tool-calling turns. All passed against the real APIs on 2026-10-19 (`docs/experiment-log.md`). |
 | Adversarial strategies | 6 <!-- fact:adversarial.strategies --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
 | Adversarial attacks (strategies x tasks) | 150 <!-- fact:adversarial.attempted --> | MEASURED | `docs/reward-hacking-log.md`, block `adversarial:summary` |
 | CI jobs | 2 <!-- fact:ci.jobs --> | MEASURED | `.github/workflows/ci.yml` (`check`, `live`) |
@@ -290,6 +290,25 @@ marked blocks, never copied.
 - **Regenerate:** `RunMetrics(db, run).output_capped_episodes(model)`;
   `consequence report` shows it per model.
 
+### 3.18 Reasoning state round trips
+
+- **Definition:** per model, the agent turns whose reply carried reasoning
+  state the vendor requires back verbatim (Claude thinking and
+  redacted_thinking blocks, Gemini thought signatures), how many of those
+  were sent back on a next call, and how many of those next calls were
+  accepted. This is what proves the replay at scale; until it is measured,
+  the round trip is shown only by the smoke test, once per model.
+- **Formula:** over `transcripts` rows with `reasoning_state = 1`: accepted
+  when a later agent turn exists in the episode; next call failed when the
+  turn led to tool calls and the episode ended in `error` (any failure, not
+  only a rejection of the replay); otherwise not sent back (final answer, or
+  a limit ended the episode). The acceptance share is accepted over sent
+  back, with a Wilson interval.
+- **Value:** NOT YET MEASURED
+- **Will come from:** the first real run.
+- **Regenerate:** `RunMetrics(db, run).reasoning_round_trips(model)`;
+  `consequence report` shows it per model.
+
 ## 4. Engineering decisions worth claiming
 
 | Decision | Why it was made | Where it is enforced in code | What it rules out |
@@ -316,6 +335,7 @@ marked blocks, never copied.
 | A verdict format each judge can be held to | Claude Opus 5.5 rejects forced tool use, so an optional `record_verdict` call could come back as prose | The primary judge answers through structured outputs (`output_config.format`, the verdict schema); the adapter turns the JSON into the same call, checked by the same `parse_vote` | Verdicts lost to `malformed_output`, or guessed from prose |
 | Equal evidence for the judge across models, then measured | Opus 5.5's notes between tool calls come back empty by default where other models write text | Opus 5.5 agents run with `thinking.display: "updates"`, documented as changing only what is returned; the adapter keeps the updates as turn text; `narration_chars` reports what asymmetry remains | A per-model gap that differs because the judge read less |
 | One output cap for every model under test, set above what reasoning needs | Thinking counts toward the cap; a model that spends a small one on thinking returns no tool call and is scored as failing for a reason unrelated to its behaviour, which biases the benchmark against reasoning models | `models.yaml` `agent_max_output_tokens: 16000`; `load_model_registry` refuses a per-model cap; `tests/test_output_cap.py` and the SDK wire tests check every model's request carries it | Comparing models run under different caps; scoring a truncated turn as the model's choice |
+| A reasoning round trip counts only if it was exercised | A second call that succeeds proves nothing about replay if the first reply carried no reasoning state, and adaptive thinking can skip reasoning | Every adapter reports `reasoning_state`, stored on every agent turn; the smoke two-turn test for Opus 5.5 and the Gemini models skips ("no reasoning produced; round trip unproven") instead of passing when there was none; `metrics.reasoning_round_trips` counts carried, sent back and accepted per model | Claiming the replay works from calls that never replayed anything |
 | Truncation stored per turn and measured per model | A cap can still be hit; assuming it never is would hide the bias it was raised to remove | `transcripts.stop_reason` (verbatim) and `output_capped` (each adapter's mapping of its vendor's cap stop), required by the schema on every agent turn; `metrics.output_capped_episodes` | Unmeasured residual truncation in a per-model comparison |
 | Every billed smoke call rehearsed offline through the real SDKs | A request the pinned SDK refuses only shows up when someone pays for a call | `tests/test_provider_sdk.py` runs each smoke-test call through the real SDK against a fake transport; CI installs the SDKs | Smoke-test failures from SDK argument handling (two found: 5.17, 5.18) |
 | A planted-bug harness that refuses a red baseline | A count of "tests that caught the bug" is only meaningful if those tests pass without it | `consequence/planted_bugs.py` runs both suites unchanged first and stops without planting or writing if either has a failure | Publishing noise as validation, as happened once with the database down |
@@ -607,8 +627,9 @@ How I would say each one out loud:
   judge is `claude-opus-5-5` at the provider's default sampling, with no
   temperature sent (section 4), because the judge's strength matters more
   than its sampling controls.
-- **How it was proven:** against documentation only. The judge smoke tests,
-  unrun, are what will confirm it.
+- **How it was proven:** the judge smoke tests, 2026-10-19
+  (`docs/experiment-log.md`): `judge-claude-opus-5.5` returned a verdict with
+  no temperature sent, and `judge-gpt-5.1` at 0 and 0.7.
 
 ### 5.15 Gemini adapter: thinking left out of cost, and a storage crash
 
@@ -624,7 +645,9 @@ How I would say each one out loud:
 - **Fix:** `f399150`. Output tokens add `thoughts_token_count`; the raw
   response is stored in JSON mode.
 - **How it was proven:** `test_google_replays_its_content_and_counts_thinking_as_output`
-  with a fake response; not yet against the real API.
+  with a fake response. The real Gemini calls in the 2026-10-19 smoke run
+  were recorded without error; their token counts were not checked against
+  Google's billing.
 
 ### 5.16 Reasoning state was dropped between agent turns
 
@@ -642,9 +665,10 @@ How I would say each one out loud:
   that produced it.
 - **How it was proven:** offline tests check the replay goes back verbatim
   (`test_anthropic_replays_its_own_blocks_verbatim`,
-  `test_the_harness_replays_and_records_the_served_model`); each model's smoke
-  test now makes a second call after a tool result, which is what will prove
-  the vendors accept it.
+  `test_the_harness_replays_and_records_the_served_model`); every model's
+  two-turn smoke test, whose second call carries the first reply back
+  verbatim, passed against the real APIs on 2026-10-19
+  (`docs/experiment-log.md`).
 
 ### 5.17 The Anthropic SDK has no temperature parameter
 
@@ -700,6 +724,38 @@ How I would say each one out loud:
   each adapter's mapping, storage on every turn, the schema's refusal, the
   metric) and `test_a_gemini_turn_cut_off_by_the_cap_is_flagged_through_the_real_sdk`.
 
+### 5.20 Gemini rejected every tool the benchmark gives an agent
+
+- **What was wrong:** the Google adapter sent each tool's JSON Schema as a
+  function declaration's `parameters`, which "Represents a select subset of
+  an OpenAPI 3.0 schema object" with no `additionalProperties`. Every tool
+  schema sets `additionalProperties: false`, so the API rejected each agent
+  request with 400 `Unknown name "additional_properties"`: neither Gemini
+  model could have run a single episode.
+- **How it was discovered:** the first smoke run, 2026-10-19 (both Gemini
+  model tests failed with that error).
+- **Why the offline SDK tests couldn't catch it:** `tests/test_provider_sdk.py`
+  sends each request through the real Google SDK, but to a fake server that
+  accepts any payload. The SDK didn't object: it serialized
+  `additionalProperties` as `additional_properties` without complaint. The
+  check that refused it is Google's, on Google's servers, so only a real
+  call could reach it. The offline test now pins the fixed shape (the schema
+  in `parameters_json_schema`, no `additional_properties` anywhere), which
+  guards the fix but could not have found the defect.
+- **Mechanism:** the adapter used the OpenAPI-subset field for a full JSON
+  Schema; the SDK serialized the unsupported keyword instead of refusing it.
+- **Fix:** the `smoke-run fixes` commit. The schema goes, unchanged, in
+  `parameters_json_schema`, which "Describes the parameters to the function
+  in JSON Schema format" (https://ai.google.dev/api/generate-content), so
+  Gemini gets the same tool schema as every other model, with
+  `additionalProperties: false` kept, not stripped. Argument enforcement
+  never depended on it: the tool layer refuses undeclared arguments from
+  every adapter alike (`tests/test_tool_arguments.py`).
+- **How it was proven:** offline,
+  `test_gemini_gets_the_tool_schema_unchanged_as_json_schema`; then both
+  Gemini smoke tests passed against the real API (`pytest -m smoke -rf -k
+  gemini`, 2026-10-19, `docs/experiment-log.md`).
+
 ## 6. Evidence that the work validates itself
 
 ### Adversarial verifier audit
@@ -738,6 +794,30 @@ design.
 | Judge imports the state diff: offline tests failing | 1 <!-- fact:planted.judge_imports_state_diff.offline --> | MEASURED | `planted-bugs` |
 | Manual spot-check agreement with the failure taxonomy | NOT YET MEASURED | NOT YET MEASURED | Needs `docs/failure-taxonomy.md` |
 
+### Smoke-run facts
+
+From the 2026-10-19 smoke runs (`pytest -m smoke -rf`), cited from the
+`smoke-runs` block of `docs/experiment-log.md`; each is one billed call per
+condition, "passed" meaning the smoke test passed. They show a
+request is accepted and its reply parses; they measure no model behaviour.
+
+| Fact | Value | Status | Source |
+|---|---|---|---|
+| `judge-gpt-5.1` (`gpt-5.1-2025-11-13`) accepts temperature 0 | passed <!-- fact:smoke.judge_gpt_5_1_t0 --> | MEASURED | smoke `test_judge_returns_a_parseable_verdict[judge-gpt-5.1-t0]` |
+| `judge-gpt-5.1` accepts temperature 0.7 | passed <!-- fact:smoke.judge_gpt_5_1_t0_7 --> | MEASURED | smoke `...[judge-gpt-5.1-t0.7]` |
+| `deepseek-v3.2` via OpenRouter accepts the 16,000-token agent cap | passed <!-- fact:smoke.model_deepseek_v3_2 --> | MEASURED | smoke `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[deepseek-v3.2]` (one host, as routed that day) |
+| A second call carrying the first reply back verbatim is accepted: `claude-opus-5.5` | passed <!-- fact:smoke.model_claude_opus_5_5 --> | MEASURED | smoke two-turn test `[claude-opus-5.5]` |
+| The same: `gemini-4-argon` | passed <!-- fact:smoke.model_gemini_4_argon --> | MEASURED | smoke two-turn test `[gemini-4-argon]`, after the 5.20 fix |
+| The same: `gemini-3.5-flash-lite` | passed <!-- fact:smoke.model_gemini_3_5_flash_lite --> | MEASURED | smoke two-turn test `[gemini-3.5-flash-lite]`, after the 5.20 fix |
+| Structured-output verdict from the primary judge (`judge-claude-opus-5.5`, no temperature sent) parses | passed <!-- fact:smoke.judge_claude_opus_5_5_provider_default --> | MEASURED | smoke `...[judge-claude-opus-5.5-provider_default]` |
+
+What the replay rows don't show: the run that produced them didn't assert
+that the first reply contained thinking blocks or thought signatures
+(adaptive thinking can skip thinking on a simple request), so "accepted" is
+proven, "reasoning state round-tripped" is not. The smoke test now asserts
+it, and skips rather than passes when a reply carries none; it hasn't been
+run in that form. The at-scale figure is 3.18.
+
 ### CI
 
 Two jobs (`.github/workflows/ci.yml`): `check` runs `ruff check .` and the
@@ -772,7 +852,7 @@ something not yet measured.
 - **READY** Caught a write-then-revert exploit that passed all 25 <!-- fact:adversarial.transient_write.succeeded_at_baseline --> verifiers, by adding an audit-trail check that every verifier inherits centrally.
 - **READY** Found and fixed a tool-layer bug where a single wildcard character in model input returned every supplier's records, proven by restoring the old filter and watching 5 <!-- fact:planted.substring_supplier_filter.live --> new tests fail.
 - **READY** Made grading reproducible from a single results file with no database or model access, verified by planting a grader bug that 27 <!-- fact:planted.reads_live_environment.offline --> offline tests catch.
-- **READY** Built a test suite of 747 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
+- **READY** Built a test suite of 757 <!-- fact:tests.offline --> offline and 332 <!-- fact:tests.live --> live tests, with CI running the live suite against a Postgres service container on every push.
 - **DRAFT** Measured how often agents claim success the database contradicts (verification gap: NOT YET MEASURED) across the registry's models, by grading final state instead of transcripts.
 - **DRAFT** Showed the difference between one-shot and every-time reliability (pass@1 vs pass^k: NOT YET MEASURED), by running repeated trials per task and model.
 - **DRAFT** Quantified collateral damage (rate: NOT YET MEASURED) by classifying every out-of-scope row change as benign or destructive.
@@ -782,10 +862,12 @@ something not yet measured.
 
 - **Any result about real models.** No episode has been run against a real
   model. Every finding in section 3 is NOT YET MEASURED.
-- **"Supports Anthropic, OpenAI, Google and OpenRouter" as tested.** The
-  adapters are implemented and unit-tested offline, but the smoke tests that
-  make one real API call per provider have never run. Claim "adapters
-  implemented", not "verified against".
+- **"Supports Anthropic, OpenAI, Google and OpenRouter" as more than
+  wiring.** Every smoke test has passed once against the real APIs
+  (2026-10-19, `docs/experiment-log.md`): each request is accepted and its
+  reply parses. That is a minimal call per condition, not a run: nothing
+  about reliability over hundreds of episodes, rate limits or behaviour.
+  Claim "smoke-tested against each provider", not "validated at scale".
 - **Pinned prices and model strings as confirmed.** `docs/models.md` records
   which still need live confirmation.
 - **"The environment DB was stopped and grading still worked."** That test is
@@ -798,19 +880,24 @@ something not yet measured.
   `consequence/planted_bugs.py` before citing any count.
 - **Anything about adoption.** No one else uses it, it has no stars or
   forks, and no release.
-- **Any judge result.** The judge is built and tested against stubs only; it
-  has never called a real model. Its accuracy, its agreement figures and its
-  self-preference are all unmeasured.
+- **Any judge result.** Each judge has answered one smoke-test transcript,
+  but no real episode has been judged. Its accuracy, its agreement figures
+  and its self-preference are all unmeasured.
 - **"`judge_api_agreement` shows the judge is consistent."** It measures API
   nondeterminism at temperature 0, not reliability. Only the temperature-0.7
   stability subset speaks to reliability.
 - **"Self-preference bias is handled."** The cross-family judge is a design
   that can measure it; nothing has been measured.
-- **"Every model ID and context window is verified."** They are taken from
-  vendor documentation, checked 2026-10-14 and 2026-10-15 and cited in
-  `models.yaml`; no call has confirmed them yet (the smoke suite is unrun).
-- **"The replay fix works with the real APIs."** It is tested offline only;
-  the two-turn smoke tests are what will show the vendors accept it.
+- **"Every context window is verified."** They are taken from vendor
+  documentation, checked 2026-10-14 and 2026-10-15 and cited in
+  `models.yaml`; no call has tested them. Every pinned model ID has answered a
+  real smoke-test call (2026-10-19).
+- **"Reasoning state round-trips" for any model.** Not yet shown: the smoke
+  run accepted a second call carrying the first reply back, but didn't check
+  the first reply held any reasoning state. The claim waits for 3.18
+  (carried, sent back and accepted turns per model, from the full run), and
+  for the smoke test in its new form, which skips when there is nothing to
+  round-trip.
 - **The judge saw the same agent text for every model.** Opus 5.5's notes
   between tool calls are now returned (`display: "updates"`), but they are
   summaries and it may skip any of them, and every model narrates as much as
@@ -819,8 +906,9 @@ something not yet measured.
 - **"No model was truncated."** The cap is 16,000 tokens per agent turn for
   every model, but a turn can still reach it; how many episodes did is
   `output_capped_episodes`, not yet measured. DeepSeek V3.2's maximum output
-  through OpenRouter isn't documented on its OpenRouter pages, so whether it
-  accepts 16,000 rests on the unrun smoke test.
+  through OpenRouter isn't documented on its OpenRouter pages; it accepted
+  16,000 in the smoke run, but OpenRouter routes between hosts, so that
+  shows one host's limit, not every host's.
 - **"Every model ran at the same reasoning effort."** Each runs at its
   provider's default, and the defaults differ (Opus 5.5 `medium`, GPT-5.1
   `none`, Gemini 4 Argon `medium`, Gemini 3.5 Flash-Lite `minimal`,
@@ -835,9 +923,9 @@ something not yet measured.
 - **"The primary judge's verdicts are temperature 0" or "its agreement is API
   determinism".** It runs at the provider's default sampling; its vote
   agreement is sampling stability.
-- **"The cross-family judge runs at temperature 0 and 0.7."** Unverified for
-  GPT-5.1: OpenAI's model page is silent on sampling parameters, and
-  community reports say GPT-5-series reasoning models reject `temperature`.
+- **"GPT-5.1's temperature is documented."** OpenAI's model page is silent
+  on sampling parameters; that `judge-gpt-5.1` accepts 0 and 0.7 rests on the
+  2026-10-19 smoke run, not on documentation.
 - **"Self-preference is ruled out."** The primary judge is the same model as
   one model under test (`claude-opus-5.5`), the strongest form of the risk;
   only the cross-family comparison can show its size.
@@ -860,6 +948,8 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-22 | `smoke-run fixes` | Every adapter reports and every agent turn stores `reasoning_state`; the smoke two-turn test now asserts reasoning state for Opus 5.5 and the Gemini models and skips ("no reasoning produced; round trip unproven") when there is none; added 3.18 (reasoning round trips, metric 22), an engineering decision, and replaced the replay guard in section 9: the round-trip claim waits for 3.18. |
+| 2026-10-19 | `smoke-run fixes` | First smoke run: added defect 5.20 (Gemini rejected every tool schema, fixed by sending it unchanged as `parameters_json_schema`; why the offline SDK tests couldn't catch it), smoke-run facts in section 6, `tests/test_tool_arguments.py` (undeclared arguments refused for every vendor), marked 5.14, 5.16 and 5.20 proven against the real APIs and 5.15 partly, recorded both smoke runs in `docs/experiment-log.md`, and rewrote five section 9 guards that said the smoke suite had never run. |
 | 2026-10-17 | `final prep` | One agent output cap of 16,000 tokens for every model under test, and every agent at its provider's default reasoning settings, both recorded as experimental conditions. Added 3.17 (episodes cut off by the cap, metric 21), two engineering decisions, defect 5.19 (a 4,096 cap with thinking, and Gemini cut-offs hidden by the Google adapter) and two section 9 guards. |
 | 2026-10-15 | `final prep` | Primary judge `claude-opus-5-5` at the provider's default sampling, chosen as the strongest available (supersedes `claude-opus-4-6`): rewrote 3.6 and 3.7 for sampling stability, added 3.16 (visible narration, metric 20) and five engineering decisions, replaced the "chosen for its controls" decision, updated 5.14 to 5.16 to their commit, added defects 5.17 and 5.18 (found by the new offline SDK tests), and rewrote four section 9 guards. Smoke tests 9 to 8: the primary judge runs under one condition. Planted bugs re-measured: the judge-skips-errored-episodes bug is now caught by 11 offline tests, up from 10 (the new provider-default test). |
 | 2026-10-15 | `f399150` | Final lineup before `experiment-v1`: `claude-opus-5.5` replaces Opus 5, `gemini-4-argon` (stable) replaces the 3.1 Pro preview, `gemini-3.5-flash-lite` replaces Claude Haiku 4.5; primary judge `claude-opus-4-6`, because current Claude models reject any non-default temperature. Added served-version provenance (3.15, two metrics), provider-native replay, defects 5.14 to 5.16, three engineering decisions, and replaced the Haiku and Gemini-preview guards in section 9 with four current ones. |

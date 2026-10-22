@@ -76,6 +76,7 @@ def _model(m: RunMetrics, model: str, judges: list[str], primary: str | None,
         "turns_on_passes": _per_category(m.turn_stats(model)),
         "narration_chars": asdict(m.narration_chars(model)),
         "output_capped": _per_category(m.output_capped_episodes(model)),
+        "reasoning_round_trips": asdict(m.reasoning_round_trips(model)),
         "incomplete_but_verifier_satisfied": m.incomplete_but_verifier_satisfied(model),
         "judges": {
             j: {"pass_rate": _per_category(m.pass_rate_judge(model, j)),
@@ -232,6 +233,16 @@ def _model_markdown(model: str, f: dict[str, Any], primary: str | None) -> list[
         ["category", "share", "95% CI (Wilson)", "episodes of n"],
         [[cat, _pct(r["value"]), _ci(r["ci_low"], r["ci_high"]), f"{r['successes']} of {r['n']}"]
          for cat, r in f["output_capped"].items()]))
+    trips = f["reasoning_round_trips"]
+    lines.extend(["", ("### Reasoning state sent back (thinking blocks, thought signatures)"),
+                  ""])
+    lines.extend(_table(
+        ["agent turns", "carried reasoning state", "sent back on a next call", "accepted",
+         "95% CI (Wilson)", "next call failed", "not sent back (episode ended there)"],
+        [[str(trips["agent_turns"]), str(trips["carried"]), str(trips["sent_back"]),
+          f"{trips['accepted']['successes']} of {trips['accepted']['n']}",
+          _ci(trips["accepted"]["ci_low"], trips["accepted"]["ci_high"]),
+          str(trips["next_call_failed"]), str(trips["not_sent_back"])]]))
     narration = f["narration_chars"]
     lines.extend(["", (f"Visible narration (the agent's own text, not tool calls or results), "
                        f"characters per episode: median {_num(narration['median'], '.0f')}, "

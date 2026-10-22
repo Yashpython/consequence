@@ -36,7 +36,7 @@ DEFAULT_DB_PATH = "results/results.db"
 # Bump on any schema change. A results.db with a different version is refused
 # outright. There are no migrations: no real runs exist yet, so the remedy is
 # to delete the file and re-run.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class ResultsSchemaError(RuntimeError):
@@ -91,7 +91,9 @@ CREATE TABLE IF NOT EXISTS episodes (
 
 -- Every agent (assistant) turn records why it ended: stop_reason in the
 -- provider's own words, and output_capped, the provider-neutral flag for a
--- turn cut off by the output cap (metrics.output_capped_episodes). Both are
+-- turn cut off by the output cap (metrics.output_capped_episodes), and
+-- reasoning_state, whether the reply carried reasoning state the vendor
+-- requires back verbatim (metrics.reasoning_round_trips). All three are
 -- required on assistant turns and absent on every other role.
 CREATE TABLE IF NOT EXISTS transcripts (
     id            INTEGER PRIMARY KEY,
@@ -105,7 +107,9 @@ CREATE TABLE IF NOT EXISTS transcripts (
     raw_response  TEXT,
     stop_reason   TEXT,
     output_capped INTEGER CHECK (output_capped IN (0, 1)),
+    reasoning_state INTEGER CHECK (reasoning_state IN (0, 1)),
     CHECK ((role = 'assistant') = (output_capped IS NOT NULL)),
+    CHECK ((role = 'assistant') = (reasoning_state IS NOT NULL)),
     CHECK ((role = 'assistant') = (stop_reason IS NOT NULL))
 );
 
@@ -392,8 +396,8 @@ class Results:
         `turns` is the full ordered conversation: each item needs
         turn_index, role, and optionally content, tool_name, tool_args,
         tool_result, raw_response (all JSON-encoded if not already a
-        string). An assistant turn also needs stop_reason and output_capped
-        (the schema refuses one without them). If any turn is malformed, none
+        string). An assistant turn also needs stop_reason, output_capped and
+        reasoning_state (the schema refuses one without them). If any turn is malformed, none
         of them are written.
         """
         rows = [
@@ -408,6 +412,7 @@ class Results:
                 _json(turn.get("raw_response")),
                 turn.get("stop_reason"),
                 None if turn.get("output_capped") is None else int(turn["output_capped"]),
+                None if turn.get("reasoning_state") is None else int(turn["reasoning_state"]),
             )
             for turn in turns
         ]
@@ -416,8 +421,8 @@ class Results:
                 """
                 INSERT INTO transcripts (
                     episode_id, turn_index, role, content, tool_name, tool_args, tool_result,
-                    raw_response, stop_reason, output_capped
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_response, stop_reason, output_capped, reasoning_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

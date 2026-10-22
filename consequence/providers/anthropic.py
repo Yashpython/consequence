@@ -25,6 +25,8 @@ DEFAULT_MAX_TOKENS = 4096
 # https://platform.claude.com/docs/en/build-with-claude/thinking#controlling-thinking-display
 DISPLAY_UPDATES_BETA = "thinking-display-updates-2026-08-18"
 THINKING_DISPLAYS = ("omitted", "summarized", "updates")
+# Blocks that carry reasoning state and must go back unmodified.
+REASONING_BLOCKS = ("thinking", "redacted_thinking")
 # The id given to a verdict that arrived as structured output, not a tool call.
 STRUCTURED_OUTPUT_CALL_ID = "structured_output"
 # JSON Schema keywords structured outputs don't support ("Numerical
@@ -173,6 +175,7 @@ def parse_response(response: Any, latency_ms: int, retry_count: int, *,
         tool_calls=tuple(tool_calls),
         stop_reason=response.stop_reason or "end_turn",
         output_capped=response.stop_reason == "max_tokens",
+        reasoning_state=any(b.type in REASONING_BLOCKS for b in response.content),
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
         latency_ms=latency_ms,

@@ -20,11 +20,22 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 def translate_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
-    """Provider-neutral ToolDef -> Gemini's function_declarations shape."""
+    """Provider-neutral ToolDef -> Gemini's function_declarations shape.
+
+    The schema goes in parameters_json_schema, unchanged, not in parameters:
+    `parameters` "Represents a select subset of an OpenAPI 3.0 schema object"
+    with no additionalProperties (the API rejected it with 400 "Unknown name
+    additional_properties" in the first smoke run), while
+    `parametersJsonSchema` "Describes the parameters to the function in JSON
+    Schema format" and its documented example sets additionalProperties to
+    false. So every model under test is given the same tool schema.
+    https://ai.google.dev/api/generate-content (FunctionDeclaration)
+    """
     return [
         {
             "function_declarations": [
-                {"name": t.name, "description": t.description, "parameters": t.json_schema()}
+                {"name": t.name, "description": t.description,
+                 "parameters_json_schema": t.json_schema()}
                 for t in tools
             ]
         }
@@ -107,8 +118,11 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
     candidate = response.candidates[0]
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
-    for i, part in enumerate(candidate.content.parts or []):
-        if getattr(part, "text", None):
+    parts = candidate.content.parts or []
+    for i, part in enumerate(parts):
+        # A thought part is reasoning, not narration (returned only when
+        # thought summaries are requested, which they never are here).
+        if getattr(part, "text", None) and not getattr(part, "thought", False):
             text_parts.append(part.text)
         fc = getattr(part, "function_call", None)
         if fc is not None:
@@ -134,6 +148,9 @@ def parse_response(response: Any, latency_ms: int, retry_count: int) -> TurnResu
         tool_calls=tuple(tool_calls),
         stop_reason=stop_reason,
         output_capped=stop_reason == "MAX_TOKENS",
+        # Gemini's reasoning state is the thought signature on a part: "You
+        # MUST always resend all thought blocks exactly as they were received".
+        reasoning_state=any(getattr(p, "thought_signature", None) for p in parts),
         input_tokens=usage.prompt_token_count or 0,
         # Thinking tokens are billed as output ("Output (includes thinking
         # tokens)") but counted apart from candidates_token_count.

@@ -58,7 +58,10 @@ def test_google_tool_translation_matches_schema():
     for tool_def, out in zip(TOOLS, declarations, strict=True):
         assert out["name"] == tool_def.name
         assert out["description"] == tool_def.description
-        assert out["parameters"] == tool_def.json_schema()
+        # The unchanged JSON Schema, in the field that accepts it whole: Gemini's
+        # `parameters` is an OpenAPI subset without additionalProperties.
+        assert out["parameters_json_schema"] == tool_def.json_schema()
+        assert "parameters" not in out
 
 
 def test_openrouter_tool_translation_matches_openai_shape():

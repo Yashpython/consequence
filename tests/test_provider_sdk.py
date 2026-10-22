@@ -282,3 +282,58 @@ def test_a_gemini_turn_cut_off_by_the_cap_is_flagged_through_the_real_sdk():
     install(provider, spec.provider, wire)
     turn = provider.run_turn(agent_messages(), TOOLS)
     assert (turn.stop_reason, turn.output_capped, turn.tool_calls) == ("MAX_TOKENS", True, ())
+
+
+def test_gemini_gets_the_tool_schema_unchanged_as_json_schema():
+    """The first smoke run failed here: sent as `parameters`, the SDK wrote
+    additionalProperties as `additional_properties`, a field Gemini's OpenAPI
+    subset doesn't have (400). The schema must go as parametersJsonSchema,
+    exactly as every other model receives it."""
+    spec = MODELS["gemini-4-argon"]
+    provider = build_model(spec.id)
+    wire = Wire(agent_replies(spec)[:1])
+    install(provider, spec.provider, wire)
+    provider.run_turn(agent_messages(), TOOLS)
+    body = wire.requests[0]["body"]
+    declarations = body["tools"][0]["functionDeclarations"]
+    # The SDK's own wire name for parametersJsonSchema (proto JSON accepts it).
+    assert [d["parameters_json_schema"] for d in declarations] == [t.json_schema()
+                                                                  for t in TOOLS]
+    assert all("parameters" not in d for d in declarations)
+    assert "additional_properties" not in json.dumps(body)
+
+
+# -- reasoning state: detected from each vendor's reply, and the smoke skip rule -------------
+
+
+def test_reasoning_state_is_detected_from_each_vendor_s_reply():
+    """Claude thinking blocks and Gemini thought signatures, through the real
+    SDKs; a reply without them, and every OpenAI-wire reply, carries none."""
+    from test_smoke_providers import round_trip_unproven
+
+    for model_id in ("claude-opus-5.5", "gemini-4-argon", "gemini-3.5-flash-lite"):
+        spec = MODELS[model_id]
+        provider = build_model(model_id)
+        install(provider, spec.provider, Wire(agent_replies(spec)[:1]))
+        turn = provider.run_turn(agent_messages(), TOOLS)
+        assert turn.reasoning_state and not round_trip_unproven(spec, turn), model_id
+
+    plain = {"claude-opus-5.5": anthropic_reply("claude-opus-5-5", [
+                 {"type": "tool_use", "id": "tu_1", "name": "get_invoice",
+                  "input": {"invoice_id": 12}}], "tool_use"),
+             "gemini-4-argon": google_reply("gemini-4-argon", [
+                 {"functionCall": {"name": "get_invoice", "args": {"invoice_id": 12}}}])}
+    for model_id, reply in plain.items():
+        spec = MODELS[model_id]
+        provider = build_model(model_id)
+        install(provider, spec.provider, Wire([reply]))
+        turn = provider.run_turn(agent_messages(), TOOLS)
+        # No reasoning state: the smoke test must skip, not pass.
+        assert not turn.reasoning_state and round_trip_unproven(spec, turn), model_id
+
+    for model_id in ("gpt-5.1", "deepseek-v3.2"):
+        spec = MODELS[model_id]
+        provider = build_model(model_id)
+        install(provider, spec.provider, Wire(agent_replies(spec)[:1]))
+        turn = provider.run_turn(agent_messages(), TOOLS)
+        assert not turn.reasoning_state and not round_trip_unproven(spec, turn), model_id

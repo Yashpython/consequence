@@ -181,8 +181,12 @@ Every model under test runs at one output cap, `agent_max_output_tokens` in
 `models.yaml` (a per-model `max_output_tokens` under `models:` is refused),
 and at its provider's default reasoning settings (no effort/thinking
 parameter is ever sent to an agent). Every assistant transcript row stores
-`stop_reason` (verbatim) and `output_capped` (each adapter's mapping of its
-vendor's cap stop); the schema requires both.
+`stop_reason` (verbatim), `output_capped` (each adapter's mapping of its
+vendor's cap stop) and `reasoning_state` (the reply carried thinking blocks or
+thought signatures to replay); the schema requires all three.
+`metrics.reasoning_round_trips` counts carried, sent-back and accepted turns;
+the smoke two-turn test skips, never passes, when a reasoning model's first
+reply carried no reasoning state.
 `tests/test_provider_sdk.py` runs every smoke-test call through the real SDKs
 offline (CI installs `.[dev,providers]`); never send an SDK a keyword it
 lacks (Anthropic's `create()` has no `temperature`: it goes in `extra_body`).

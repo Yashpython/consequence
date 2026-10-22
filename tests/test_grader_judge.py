@@ -286,7 +286,7 @@ def test_an_oversized_transcript_is_a_context_overflow_never_truncated(tmp_path)
             {"turn_index": 0, "role": "user", "content": "Void the duplicate invoice."},
             {"turn_index": 1, "role": "tool", "tool_name": "query_invoices", "tool_args": {},
              "tool_result": {"ok": True, "data": "x" * 1_000_000, "error": None}},
-            {"turn_index": 2, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Done."},
+            {"turn_index": 2, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": "Done."},
         ])
         estimate = judge.estimate_tokens(build_messages(results.transcript_for_episode(huge)))
         assert estimate > TEST_JUDGE.context_window_tokens  # genuinely oversized

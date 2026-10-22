@@ -84,9 +84,9 @@ variations on one tier.
   16,000 tokens, thinking included. $4 / $20 per 1M, 1M-token context window.
   Details and sources: `docs/judge-methodology.md`.
   Source: https://platform.claude.com/docs/en/models/opus-5-5/overview
-- **Cross-family: `judge-gpt-5.1`** (`gpt-5.1-2025-11-13`), unchanged. Whether
-  it accepts a temperature is unverified; the smoke tests decide. If it
-  doesn't, set `sampling: provider_default` for it in `models.yaml`.
+- **Cross-family: `judge-gpt-5.1`** (`gpt-5.1-2025-11-13`), unchanged. It
+  accepted temperature 0 and 0.7 in the 2026-10-19 smoke run
+  (`docs/experiment-log.md`), so it keeps `sampling: temperature`.
 
 ## Claude Opus 5.5 in the agent loop
 
@@ -99,6 +99,12 @@ From https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5:
   always resend all thought blocks exactly as they were received", with
   signatures on the function-call parts), and the Google adapter does the
   same with its response `Content`.
+- **Reasoning state is tracked, not assumed.** Every agent turn records
+  whether its reply carried thinking blocks (Claude) or thought signatures
+  (Gemini); `metrics.reasoning_round_trips` reports, per model, how many
+  such turns were sent back on a next call and how many of those calls were
+  accepted. The smoke two-turn test skips rather than passes when a
+  reasoning model's first reply carried none.
 - **Forced tool use returns an error.** The agent never forces tool use (it
   uses the default `auto`). As the primary judge, Opus 5.5 answers through
   structured outputs instead of a tool call (`docs/judge-methodology.md`).
@@ -133,8 +139,8 @@ behaviour; the cap used to be the adapters' default, 4,096, which risked
 exactly that. 16,000 is below every documented maximum output (Claude Opus
 5.5 128K, GPT-5.1 128,000, Gemini 4 Argon and Gemini 3.5 Flash-Lite 65,536)
 and below the Anthropic SDK's non-streaming limit (21,333). DeepSeek V3.2's
-limit through OpenRouter isn't documented on its OpenRouter pages; the smoke
-test is what checks it. Only generated tokens are billed, so a higher cap
+limit through OpenRouter isn't documented on its OpenRouter pages; it accepted
+16,000 in the 2026-10-19 smoke run (`docs/experiment-log.md`). Only generated tokens are billed, so a higher cap
 costs nothing unless it is used.
 
 Every agent turn stores why it ended (`transcripts.stop_reason`, the
@@ -156,6 +162,22 @@ parameter for an agent. What that default is, per vendor documentation:
 | `gemini-4-argon` | thinking "On (medium)" | https://ai.google.dev/gemini-api/docs/thinking |
 | `gemini-3.5-flash-lite` | thinking "On (minimal)" | https://ai.google.dev/gemini-api/docs/thinking |
 | `deepseek-v3.2` | not documented on its OpenRouter pages | https://openrouter.ai/deepseek/deepseek-v3.2 |
+
+**Tool schemas: the same content for every model, one field name apart.**
+Every model receives the identical JSON Schema for every tool,
+`additionalProperties: false` included. Only where it goes differs: Gemini's
+function-declaration `parameters` "Represents a select subset of an OpenAPI
+3.0 schema object" and can't hold `additionalProperties` (the first smoke run
+got a 400 for it), so the Google adapter sends the unchanged schema as
+`parameters_json_schema`, which "Describes the parameters to the function in
+JSON Schema format" (https://ai.google.dev/api/generate-content). Nothing is
+stripped. Whether a vendor holds its model to the schema while generating a
+call is the vendor's business and is not relied on: every call, from any
+adapter, goes through the tool layer's argument check
+(`consequence/tools/impl.py` `_validate_args`), which refuses any argument a
+tool doesn't declare. Enforcement is therefore identical for every model;
+`tests/test_tool_arguments.py` sends an undeclared argument through each
+vendor's adapter and checks the same refusal and an unchanged database.
 
 Checked 2026-10-17. Claude Opus 5.5's `thinking.display: "updates"` is not a
 reasoning setting: it changes what is returned, not how the model thinks

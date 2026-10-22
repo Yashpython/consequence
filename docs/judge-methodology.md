@@ -49,7 +49,8 @@ them.
 
 What it never sees: the state diff, the before or after snapshot, the
 verifier or its checks, the seed data, the episode's status and error
-fields, or how each agent turn ended (`stop_reason`, `output_capped`). Two tests enforce this. One grades a run with both graders and
+fields, or how each agent turn ended (`stop_reason`, `output_capped`,
+`reasoning_state`). Two tests enforce this. One grades a run with both graders and
 checks that none of the stored diff, snapshots, digests, check names or seed
 text appears in any prompt. The other parses `judge.py` and checks that it
 imports none of the modules that produce state, diffs, verdicts or the seed.
@@ -238,11 +239,11 @@ blended in a report.
 - **Cross-family judge:** `judge-gpt-5.1` (`gpt-5.1-2025-11-13`). Run with
   `--judge-model judge-gpt-5.1 --judge-subset N` on a reproducible sample.
   Only non-primary judges may grade a subset, so the primary judge's verdicts
-  always cover the state verifier's episodes exactly. It is configured to
-  take a temperature (`sampling: temperature`), which is unverified for
-  GPT-5.1. If its smoke tests show it rejects one, it gets the same treatment
-  as the primary judge: `sampling: provider_default` in `models.yaml`, no
-  code change, and its three votes become its stability measurement.
+  always cover the state verifier's episodes exactly. It takes a
+  temperature (`sampling: temperature`): it accepted 0 and 0.7 in the
+  2026-10-19 smoke run (`docs/experiment-log.md`). Should that change, it
+  gets the primary judge's treatment, `sampling: provider_default` in
+  `models.yaml`, with no code change.
 
 **Self-preference risk.** The primary judge is an Anthropic model, the same
 family as one model under test (`claude-opus-5.5`); it was two until the small
@@ -343,13 +344,12 @@ votes spent before an error), from the judge's pinned prices.
   temperature judge at 0 and at 0.7), built exactly as `grade` builds it,
   and checks the verdict parses; and gives each model under test two real
   turns with tools attached, built exactly as `run` builds it.
-- **Open risk: GPT-5.1 and temperature.** OpenAI's GPT-5.1 page says nothing
-  about sampling parameters, and community reports say GPT-5-series
-  reasoning models reject `temperature` (one reports an HTTP 400). If
-  `judge-gpt-5.1` rejects it, its smoke tests fail and its judging rows would
-  be `provider_error`, never silently run at a default temperature. The
-  failing smoke test says so and names the fix: `sampling: provider_default`
-  for that judge in `models.yaml`.
+- Done: the smoke suite has passed against the real APIs (2026-10-19,
+  `docs/experiment-log.md`). Every judge condition returned a verdict that
+  parses: the primary judge through structured output at the provider's
+  default, `judge-gpt-5.1` at temperature 0 and 0.7, which settles the open
+  question of whether GPT-5.1 accepts a temperature. It proves the wiring
+  only: no real episode has been judged.
 - Run `consequence grade --preflight --run N` on the real run before judging.
 
 ## Limitations

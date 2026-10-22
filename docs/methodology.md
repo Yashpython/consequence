@@ -45,15 +45,15 @@ python -m consequence.planted_bugs --write-doc
 <!-- planted-bugs:start -->
 | Planted bug | What it does | Offline tests failing | Live tests failing |
 |---|---|---|---|
-| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 27 of 724 | 1 of 332 |
-| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 14 of 724 | 1 of 332 |
-| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 724 | 5 of 332 |
-| `judge_skips_errored_episodes` | The judge grades only completed episodes, so its denominator differs from the state verifier's. | 11 of 724 | 0 of 332 |
-| `judge_truncates_tool_results` | The transcript shown to the judge cuts each tool result at 2,000 characters. | 3 of 724 | 0 of 332 |
-| `judge_skips_overflow_check` | The judge never checks its context window, so an oversized transcript is sent instead of recorded as context_overflow. | 2 of 724 | 0 of 332 |
-| `judge_imports_state_diff` | judge.py imports the state diff module, so the transcript-only guarantee is no longer structural. | 1 of 724 | 0 of 332 |
+| `reads_live_environment` | The grader takes `before` from the live environment instead of the run's stored initial snapshot. | 27 of 733 | 1 of 332 |
+| `skips_errored_episodes` | The grader silently skips episodes that errored, timed out or ran out of turns. | 14 of 733 | 1 of 332 |
+| `substring_supplier_filter` | query_invoices' supplier_name filter as of a39b99d: an unescaped substring ILIKE, so '%' matches every supplier. | 0 of 733 | 5 of 332 |
+| `judge_skips_errored_episodes` | The judge grades only completed episodes, so its denominator differs from the state verifier's. | 11 of 733 | 0 of 332 |
+| `judge_truncates_tool_results` | The transcript shown to the judge cuts each tool result at 2,000 characters. | 3 of 733 | 0 of 332 |
+| `judge_skips_overflow_check` | The judge never checks its context window, so an oversized transcript is sent instead of recorded as context_overflow. | 2 of 733 | 0 of 332 |
+| `judge_imports_state_diff` | judge.py imports the state diff module, so the transcript-only guarantee is no longer structural. | 1 of 733 | 0 of 332 |
 
-Measured on 2026-10-17, at commit `f399150` plus uncommitted changes (last commit 2026-10-15) by `python -m consequence.planted_bugs --write-doc`.
+Measured on 2026-10-22, at commit `12ad4bb` plus uncommitted changes (last commit 2026-10-17) by `python -m consequence.planted_bugs --write-doc`.
 <!-- planted-bugs:end -->
 
 ### Reading the table

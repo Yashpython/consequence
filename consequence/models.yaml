@@ -29,7 +29,8 @@
 # thinking returns no tool call and fails for a reason unrelated to its
 # behaviour. 16,000 is below every documented maximum output (Claude Opus 5.5
 # 128K; GPT-5.1 128,000; Gemini 4 Argon and Gemini 3.5 Flash-Lite 65,536;
-# DeepSeek V3.2 via OpenRouter: not documented, the smoke test checks it) and
+# DeepSeek V3.2 via OpenRouter: not documented, but accepted in the 2026-10-19
+# smoke run, docs/experiment-log.md) and
 # below the anthropic SDK's non-streaming limit (21,333). Only generated
 # tokens are billed. Turns that still hit it are counted per model:
 # metrics.output_capped_episodes.
@@ -162,6 +163,6 @@ judges:
     # "400,000 context window" for gpt-5.1 / gpt-5.1-2025-11-13, checked
     # 2026-10-14: https://developers.openai.com/api/docs/models/gpt-5.1
     context_window_tokens: 400000
-    # Unverified: whether gpt-5.1 accepts a temperature. If the judge smoke
-    # tests show it rejects one, change this to provider_default.
+    # Accepted temperature 0 and 0.7 in the 2026-10-19 smoke run
+    # (docs/experiment-log.md). If that ever changes, set provider_default.
     sampling: temperature

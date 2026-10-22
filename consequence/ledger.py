@@ -12,6 +12,7 @@ the source document that owns the number:
 
     docs/reward-hacking-log.md  <!-- adversarial:summary:start --> ... end
     docs/methodology.md         <!-- planted-bugs:start --> ... end
+    docs/experiment-log.md      <!-- smoke-runs:start --> ... end
 
 When docs/findings.md or docs/failure-taxonomy.md land, their numbers get the
 same treatment: give the document a marked block, add FACTS entries that parse
@@ -146,6 +147,22 @@ def _planted(key: str, suite: str) -> Callable[[], str]:
     return get
 
 
+SMOKE_LOG = "docs/experiment-log.md"
+
+
+def smoke_rows() -> dict[str, tuple[str, str]]:
+    """{fact key: (smoke test id, outcome)} from the experiment log's block."""
+    block = _block(SMOKE_LOG, "smoke-runs")
+    return {m.group(1): (m.group(2), m.group(3)) for m in re.finditer(
+        r"^\| (\w+) \| `([^`]+)` \| (\w+) \|", block, re.MULTILINE)}
+
+
+def _smoke(key: str) -> Callable[[], str]:
+    def get() -> str:
+        return smoke_rows()[key][1]
+    return get
+
+
 FACTS: dict[str, Callable[[], str]] = {
     "tasks.count": lambda: str(len(_tasks())),
     "tasks.easy": _difficulty("easy"),
@@ -180,6 +197,8 @@ for _strategy_name in ("do_nothing", "claim_without_acting", "opposite",
         FACTS[f"adversarial.{_strategy_name}.{_column}"] = _strategy(_strategy_name, _column)
 FACTS["dependencies.count"] = lambda: str(len(_dependencies()))
 FACTS["dependencies.pinned_exactly"] = lambda: str(sum("==" in d for d in _dependencies()))
+for _key in smoke_rows():
+    FACTS[f"smoke.{_key}"] = _smoke(_key)
 for _key in (__import__("consequence.planted_bugs", fromlist=["x"]).PLANTED_BUGS_BY_KEY):
     for _suite in ("offline", "live"):
         FACTS[f"planted.{_key}.{_suite}"] = _planted(_key, _suite)

@@ -73,3 +73,18 @@ def test_draft_bullets_may_hold_unmeasured_claims_but_unmarked_bullets_may_not()
     assert check(draft, FAKE) == []
     [problem] = check("## 8. Bullets\n- Shipped it.\n## 9. X\n", FAKE)
     assert "neither READY nor DRAFT" in problem
+
+
+def test_the_smoke_log_names_every_smoke_test_once():
+    """The ledger's smoke facts come from the experiment log's block; a smoke
+    test added or renamed without a logged outcome must fail here."""
+    from test_smoke_providers import MODELS, _condition_id, judge_conditions
+
+    from consequence.ledger import smoke_rows
+
+    expected = {f"test_judge_returns_a_parseable_verdict[{_condition_id(c)}]"
+                for c in judge_conditions()}
+    expected |= {f"test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[{m}]"
+                 for m in MODELS}
+    logged = [test for test, _ in smoke_rows().values()]
+    assert sorted(logged) == sorted(expected)

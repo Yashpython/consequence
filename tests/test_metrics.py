@@ -271,19 +271,19 @@ def test_narration_chars_counts_the_agent_s_own_text_and_nothing_else(tmp_path):
         results.record_transcript(talkative, [
             {"turn_index": 0, "role": "system", "content": "s" * 500},
             {"turn_index": 1, "role": "user", "content": "u" * 300},
-            {"turn_index": 2, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Checking the invoice."},
+            {"turn_index": 2, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": "Checking the invoice."},
             {"turn_index": 3, "role": "tool", "tool_name": "get_invoice",
              "tool_args": {"invoice_id": 12}, "tool_result": {"ok": True, "data": "x" * 900}},
-            {"turn_index": 4, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "Done."},
+            {"turn_index": 4, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": "Done."},
         ])
         results.record_transcript(silent, [
             {"turn_index": 0, "role": "user", "content": "u"},
-            {"turn_index": 1, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": None},
+            {"turn_index": 1, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": None},
             {"turn_index": 2, "role": "tool", "tool_name": "get_invoice",
              "tool_args": {"invoice_id": 1}, "tool_result": {"ok": True}},
         ])
         results.record_transcript(other, [
-            {"turn_index": 0, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "content": "z" * 40}])
+            {"turn_index": 0, "role": "assistant", "stop_reason": "end_turn", "output_capped": False, "reasoning_state": False, "content": "z" * 40}])
     with RunMetrics(path, run_id) as m:
         mine, theirs = m.narration_chars("m-a"), m.narration_chars("m-b")
     assert (mine.n, mine.median, mine.p90) == (2, (26 + 0) / 2, 26)
@@ -629,7 +629,7 @@ def test_judge_cost_is_per_judge_and_complete(tmp_path):
 
 
 def test_every_listed_metric_exists():
-    assert len(metrics.METRICS) == 21
+    assert len(metrics.METRICS) == 22
     for name in metrics.METRICS:
         assert callable(getattr(RunMetrics, name)), name
 

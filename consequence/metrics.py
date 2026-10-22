@@ -54,7 +54,7 @@ MODELS_YAML = Path(__file__).resolve().parent / "models.yaml"
 
 # Must equal consequence.results.SCHEMA_VERSION (a test checks); not imported
 # from there because that module pulls in the environment database code.
-RESULTS_SCHEMA_VERSION = 8
+RESULTS_SCHEMA_VERSION = 9
 
 STATE = "state_verifier"
 COLLATERAL = "collateral"
@@ -82,7 +82,7 @@ METRICS = (
     "judge_api_agreement", "judge_vote_agreement", "trap_behaviour_split",
     "cross_judge_agreement", "incomplete_but_verifier_satisfied", "grading_coverage",
     "episode_status_counts", "judge_cost", "served_models", "judge_served_models",
-    "narration_chars", "output_capped_episodes",
+    "narration_chars", "output_capped_episodes", "reasoning_round_trips",
 )
 EPISODE_STATUSES = ("completed", "error", "timeout", "max_turns")
 
@@ -264,6 +264,19 @@ class ServedModels:
     served: dict[str, int]  # served_model value -> episodes (or judge rows)
     unknown: int  # episodes / rows whose response named no model
     drift: bool  # more than one distinct model served this configuration
+
+
+@dataclass(frozen=True)
+class RoundTrips:
+    """Agent turns that carried reasoning state, and what became of it."""
+
+    model: str
+    agent_turns: int
+    carried: int  # turns whose reply carried reasoning state
+    sent_back: int  # of those, followed by a next call that carried it back
+    accepted: Rate  # of sent_back: that next call returned a turn
+    next_call_failed: int  # sent back, and the next call raised (episode 'error')
+    not_sent_back: int  # the episode ended at that turn: final answer, or a limit
 
 
 @dataclass(frozen=True)
@@ -832,6 +845,46 @@ class RunMetrics:
             "AND t.output_capped = 1", (self.run_id, model))}
         return {cat: rate(sum(e["id"] in capped for e in episodes), len(episodes))
                 for cat, episodes in self._by_category(model).items()}
+
+    def reasoning_round_trips(self, model: str) -> RoundTrips:
+        """22. Agent turns that carried reasoning state the vendor requires
+        back verbatim (transcripts.reasoning_state: Claude thinking blocks,
+        Gemini thought signatures), and how many of those were followed by an
+        accepted next call: the replay proven at scale, not assumed.
+
+        For each carried turn: a later agent turn in the episode means the
+        next call, which carried the state back, returned (accepted). No later
+        turn, the turn led to tool calls, and the episode ended in 'error'
+        means that next call raised (next_call_failed: any failure, not only a
+        rejection of the replay; the episode's error says which). Otherwise
+        the state was never sent back (the turn was the final answer, or the
+        turn, token or time limit ended the episode first)."""
+        status = {e["id"]: e["status"] for e in self._episodes(model)}
+        rows: dict[int, list[sqlite3.Row]] = {episode: [] for episode in status}
+        for row in self._conn.execute(
+                "SELECT t.episode_id, t.role, t.reasoning_state FROM transcripts t "
+                "JOIN episodes e ON e.id = t.episode_id "
+                "WHERE e.run_id = ? AND e.model_id = ? ORDER BY t.episode_id, t.turn_index",
+                (self.run_id, model)):
+            rows[row["episode_id"]].append(row)
+        agent_turns = carried = accepted = failed = 0
+        for episode, turns in rows.items():
+            for i, turn in enumerate(turns):
+                if turn["role"] != "assistant":
+                    continue
+                agent_turns += 1
+                if not turn["reasoning_state"]:
+                    continue
+                carried += 1
+                later = turns[i + 1:]
+                if any(t["role"] == "assistant" for t in later):
+                    accepted += 1
+                elif later and later[0]["role"] == "tool" and status[episode] == "error":
+                    failed += 1
+        sent_back = accepted + failed
+        return RoundTrips(model=model, agent_turns=agent_turns, carried=carried,
+                          sent_back=sent_back, accepted=rate(accepted, sent_back),
+                          next_call_failed=failed, not_sent_back=carried - sent_back)
 
     def served_model_drift(self) -> list[ServedModels]:
         """Every model and judge in this run whose served version changed."""

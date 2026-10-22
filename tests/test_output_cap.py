@@ -157,7 +157,8 @@ def _episode(results, run_id, task_id, model, capped_turns):
                                      trial_index=0, status="completed")
     results.record_transcript(episode, [
         {"turn_index": i, "role": "assistant", "content": None,
-         "stop_reason": "max_tokens" if capped else "end_turn", "output_capped": capped}
+         "stop_reason": "max_tokens" if capped else "end_turn", "output_capped": capped,
+         "reasoning_state": False}
         for i, capped in enumerate(capped_turns)])
     return episode
 

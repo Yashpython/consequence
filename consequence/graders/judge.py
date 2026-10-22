@@ -174,8 +174,8 @@ def render_transcript(turns: Sequence[dict[str, Any]]) -> str:
     raw_response, the provider's own wire encoding of an assistant turn whose
     text is already shown here, and whose tool calls appear, with their
     results, as the tool turns that follow it; and stop_reason /
-    output_capped, harness metadata about how a turn ended, which the judge
-    never sees, like the episode's status.
+    output_capped / reasoning_state, harness metadata about how a turn
+    ended, which the judge never sees, like the episode's status.
     """
     blocks = []
     for turn in turns:

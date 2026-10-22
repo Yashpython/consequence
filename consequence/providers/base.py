@@ -40,6 +40,11 @@ class TurnResult:
     # vendor's own reason (Anthropic "max_tokens", OpenAI-wire "length",
     # Gemini MAX_TOKENS) to this one provider-neutral flag.
     output_capped: bool = False
+    # The reply carried reasoning state the vendor requires back verbatim on
+    # the next call (Claude thinking / redacted_thinking blocks, Gemini thought
+    # signatures). It travels in `replay`; this says whether there was any, so
+    # a round trip can be shown to have been exercised rather than assumed.
+    reasoning_state: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
