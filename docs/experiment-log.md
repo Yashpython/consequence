@@ -34,14 +34,14 @@ every smoke test the suite collects, so it can't go stale silently:
 <!-- smoke-runs:start -->
 | fact | smoke test | outcome | when |
 |---|---|---|---|
-| judge_claude_opus_5_5_provider_default | `test_judge_returns_a_parseable_verdict[judge-claude-opus-5.5-provider_default]` | passed | 2026-10-19, `12ad4bb` |
-| judge_gpt_5_1_t0 | `test_judge_returns_a_parseable_verdict[judge-gpt-5.1-t0]` | passed | 2026-10-19, `12ad4bb` |
-| judge_gpt_5_1_t0_7 | `test_judge_returns_a_parseable_verdict[judge-gpt-5.1-t0.7]` | passed | 2026-10-19, `12ad4bb` |
-| model_claude_opus_5_5 | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[claude-opus-5.5]` | passed | 2026-10-19, `12ad4bb` |
-| model_deepseek_v3_2 | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[deepseek-v3.2]` | passed | 2026-10-19, `12ad4bb` |
-| model_gemini_3_5_flash_lite | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[gemini-3.5-flash-lite]` | passed | 2026-10-19, `12ad4bb`; second run, with the Google adapter fix; failed on the first (defect 5.20) |
-| model_gemini_4_argon | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[gemini-4-argon]` | passed | 2026-10-19, `12ad4bb`; second run, with the Google adapter fix; failed on the first (defect 5.20) |
-| model_gpt_5_1 | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[gpt-5.1]` | passed | 2026-10-19, `12ad4bb` |
+| judge_claude_opus_5_5_provider_default | `test_judge_returns_a_parseable_verdict[judge-claude-opus-5.5-provider_default]` | passed | 2026-10-22, `348a2ac` |
+| judge_gpt_5_1_t0 | `test_judge_returns_a_parseable_verdict[judge-gpt-5.1-t0]` | passed | 2026-10-22, `348a2ac` |
+| judge_gpt_5_1_t0_7 | `test_judge_returns_a_parseable_verdict[judge-gpt-5.1-t0.7]` | passed | 2026-10-22, `348a2ac` |
+| model_claude_opus_5_5 | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[claude-opus-5.5]` | passed | 2026-10-22, `348a2ac` |
+| model_deepseek_v3_2 | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[deepseek-v3.2]` | passed | 2026-10-22, `348a2ac` |
+| model_gemini_3_5_flash_lite | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[gemini-3.5-flash-lite]` | passed | 2026-10-22, `348a2ac` |
+| model_gemini_4_argon | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[gemini-4-argon]` | passed | 2026-10-22, `348a2ac` |
+| model_gpt_5_1 | `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[gpt-5.1]` | passed | 2026-10-22, `348a2ac` |
 <!-- smoke-runs:end -->
 
 Together, every smoke test has passed once against the real APIs, each with
@@ -57,8 +57,17 @@ Claude Opus 5.5 and both Gemini models. Not established: whether those first
 replies contained thinking blocks or thought signatures, which the test
 doesn't check. Since then the two-turn test asserts it for Claude Opus 5.5 and
 the Gemini models, and skips with "no reasoning produced; round trip
-unproven" when a first reply carries none; the outcomes in the block above
-predate that change. Rerunning the smoke suite may turn a pass into a skip.
+unproven" when a first reply carries none.
+
+- **2026-10-22, at `348a2ac`.** `pytest -m smoke -rf`: 8 passed, 0 skipped
+  (summary line "8 passed, 1089 deselected in 70.16s"; pytest reports a
+  skipped count whenever any test skips). This is the first run with the
+  round-trip assertion, so for `claude-opus-5.5`, `gemini-4-argon` and
+  `gemini-3.5-flash-lite` the first reply carried reasoning state (thinking
+  blocks; thought signatures) and the second call, carrying it back
+  verbatim, was accepted: the reasoning round trip was exercised, once per
+  model. The other five passes repeat the earlier results on the committed
+  code. The outcomes in the block above are this run's.
 
 ## Served-model drift
 

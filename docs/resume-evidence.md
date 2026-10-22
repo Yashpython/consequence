@@ -806,17 +806,16 @@ request is accepted and its reply parses; they measure no model behaviour.
 | `judge-gpt-5.1` (`gpt-5.1-2025-11-13`) accepts temperature 0 | passed <!-- fact:smoke.judge_gpt_5_1_t0 --> | MEASURED | smoke `test_judge_returns_a_parseable_verdict[judge-gpt-5.1-t0]` |
 | `judge-gpt-5.1` accepts temperature 0.7 | passed <!-- fact:smoke.judge_gpt_5_1_t0_7 --> | MEASURED | smoke `...[judge-gpt-5.1-t0.7]` |
 | `deepseek-v3.2` via OpenRouter accepts the 16,000-token agent cap | passed <!-- fact:smoke.model_deepseek_v3_2 --> | MEASURED | smoke `test_evaluated_model_makes_a_parseable_tool_call_and_takes_its_result[deepseek-v3.2]` (one host, as routed that day) |
-| A second call carrying the first reply back verbatim is accepted: `claude-opus-5.5` | passed <!-- fact:smoke.model_claude_opus_5_5 --> | MEASURED | smoke two-turn test `[claude-opus-5.5]` |
-| The same: `gemini-4-argon` | passed <!-- fact:smoke.model_gemini_4_argon --> | MEASURED | smoke two-turn test `[gemini-4-argon]`, after the 5.20 fix |
-| The same: `gemini-3.5-flash-lite` | passed <!-- fact:smoke.model_gemini_3_5_flash_lite --> | MEASURED | smoke two-turn test `[gemini-3.5-flash-lite]`, after the 5.20 fix |
+| Reasoning round trip exercised: the first reply carried thinking blocks and the second call, carrying them back verbatim, was accepted: `claude-opus-5.5` | passed <!-- fact:smoke.model_claude_opus_5_5 --> | MEASURED | smoke two-turn test `[claude-opus-5.5]`, 2026-10-22 at `348a2ac`, which skips instead of passing when no reasoning state is produced |
+| The same, with thought signatures: `gemini-4-argon` | passed <!-- fact:smoke.model_gemini_4_argon --> | MEASURED | smoke two-turn test `[gemini-4-argon]`, same run |
+| The same, with thought signatures: `gemini-3.5-flash-lite` | passed <!-- fact:smoke.model_gemini_3_5_flash_lite --> | MEASURED | smoke two-turn test `[gemini-3.5-flash-lite]`, same run |
 | Structured-output verdict from the primary judge (`judge-claude-opus-5.5`, no temperature sent) parses | passed <!-- fact:smoke.judge_claude_opus_5_5_provider_default --> | MEASURED | smoke `...[judge-claude-opus-5.5-provider_default]` |
 
-What the replay rows don't show: the run that produced them didn't assert
-that the first reply contained thinking blocks or thought signatures
-(adaptive thinking can skip thinking on a simple request), so "accepted" is
-proven, "reasoning state round-tripped" is not. The smoke test now asserts
-it, and skips rather than passes when a reply carries none; it hasn't been
-run in that form. The at-scale figure is 3.18.
+The round-trip rows rest on the 2026-10-22 run, the first with the assertion:
+8 passed, 0 skipped, so each of the three first replies carried reasoning
+state and each second call carrying it back was accepted. That is one
+exchange per model. The at-scale figure, over every agent turn of the full
+run, is 3.18, not yet measured.
 
 ### CI
 
@@ -892,12 +891,10 @@ something not yet measured.
   documentation, checked 2026-10-14 and 2026-10-15 and cited in
   `models.yaml`; no call has tested them. Every pinned model ID has answered a
   real smoke-test call (2026-10-19).
-- **"Reasoning state round-trips" for any model.** Not yet shown: the smoke
-  run accepted a second call carrying the first reply back, but didn't check
-  the first reply held any reasoning state. The claim waits for 3.18
-  (carried, sent back and accepted turns per model, from the full run), and
-  for the smoke test in its new form, which skips when there is nothing to
-  round-trip.
+- **"Reasoning state round-trips reliably" or "at scale".** The round trip
+  has been exercised once per model (Opus 5.5 and both Gemini models, smoke
+  run of 2026-10-22). Over long episodes and hundreds of runs it waits for
+  3.18 (carried, sent back and accepted turns per model, from the full run).
 - **The judge saw the same agent text for every model.** Opus 5.5's notes
   between tool calls are now returned (`display: "updates"`), but they are
   summaries and it may skip any of them, and every model narrates as much as
@@ -948,6 +945,7 @@ something not yet measured.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-22 | `recorded smoke run` | Recorded the 2026-10-22 smoke run at `348a2ac` (8 passed, 0 skipped, the first with the round-trip assertion) in `docs/experiment-log.md`; the three replay rows in section 6 now state the reasoning round trip as exercised, MEASURED; narrowed the section 9 guard to the at-scale claim, which still waits for 3.18. |
 | 2026-10-22 | `smoke-run fixes` | Every adapter reports and every agent turn stores `reasoning_state`; the smoke two-turn test now asserts reasoning state for Opus 5.5 and the Gemini models and skips ("no reasoning produced; round trip unproven") when there is none; added 3.18 (reasoning round trips, metric 22), an engineering decision, and replaced the replay guard in section 9: the round-trip claim waits for 3.18. |
 | 2026-10-19 | `smoke-run fixes` | First smoke run: added defect 5.20 (Gemini rejected every tool schema, fixed by sending it unchanged as `parameters_json_schema`; why the offline SDK tests couldn't catch it), smoke-run facts in section 6, `tests/test_tool_arguments.py` (undeclared arguments refused for every vendor), marked 5.14, 5.16 and 5.20 proven against the real APIs and 5.15 partly, recorded both smoke runs in `docs/experiment-log.md`, and rewrote five section 9 guards that said the smoke suite had never run. |
 | 2026-10-17 | `final prep` | One agent output cap of 16,000 tokens for every model under test, and every agent at its provider's default reasoning settings, both recorded as experimental conditions. Added 3.17 (episodes cut off by the cap, metric 21), two engineering decisions, defect 5.19 (a 4,096 cap with thinking, and Gemini cut-offs hidden by the Google adapter) and two section 9 guards. |
